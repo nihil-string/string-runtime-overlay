@@ -108,9 +108,9 @@ p {
   border-color: rgba(169, 240, 181, 0.5);
 }
 
-.state-mock {
-  color: #ffe0bd;
-  border-color: rgba(255, 201, 168, 0.5);
+.state-pending {
+  color: #fff2b8;
+  border-color: rgba(255, 242, 184, 0.5);
 }
 
 .toolbar {
@@ -219,6 +219,14 @@ p {
 
 .role-slot.empty {
   color: var(--faint);
+}
+
+.role-slot.empty .member-name {
+  cursor: default;
+}
+
+.role-slot.empty .member-cell::after {
+  content: "";
 }
 
 .role-slot.duplicate {

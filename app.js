@@ -33,10 +33,174 @@
   let pendingBroadcastTimer;
   let pointerDragState;
   let currentPlayerName = '';
+  let overlayConnected = false;
+  const overlayReadyCallbacks = [];
 
   const hasOverlayApi = () =>
     typeof window.addOverlayListener === 'function' &&
     typeof window.callOverlayHandler === 'function';
+
+  function markOverlayReady() {
+    if (overlayConnected)
+      return;
+    overlayConnected = true;
+    for (const callback of overlayReadyCallbacks.splice(0)) {
+      try {
+        callback();
+      } catch (error) {
+        console.error(error);
+      }
+    }
+  }
+
+  function onOverlayReady(callback) {
+    if (overlayConnected) {
+      callback();
+      return;
+    }
+    overlayReadyCallbacks.push(callback);
+  }
+
+  function installOverlayApi() {
+    if (hasOverlayApi()) {
+      markOverlayReady();
+      return;
+    }
+
+    let initialized = false;
+    let ws = null;
+    let queue = [];
+    let responseSequence = 0;
+    const responsePromises = {};
+    const subscribers = {};
+
+    const processEvent = (message) => {
+      const listeners = subscribers[message?.type] ?? [];
+      for (const listener of listeners) {
+        try {
+          listener(message);
+        } catch (error) {
+          console.error(error);
+        }
+      }
+    };
+
+    const sendMessage = (message, callback) => {
+      if (ws !== null) {
+        if (queue !== null)
+          queue.push(message);
+        else
+          ws.send(JSON.stringify(message));
+        return;
+      }
+
+      if (queue !== null) {
+        queue.push([message, callback]);
+        return;
+      }
+
+      window.OverlayPluginApi.callHandler(JSON.stringify(message), callback);
+    };
+
+    const flushQueue = () => {
+      const pending = queue ?? [];
+      queue = null;
+      sendMessage({ call: 'subscribe', events: Object.keys(subscribers) });
+      for (const item of pending) {
+        if (Array.isArray(item))
+          sendMessage(item[0], item[1]);
+        else
+          sendMessage(item);
+      }
+    };
+
+    const connectWebSocket = (wsUrl) => {
+      ws = new WebSocket(wsUrl);
+      ws.addEventListener('open', () => {
+        markOverlayReady();
+        flushQueue();
+      });
+      ws.addEventListener('message', (event) => {
+        try {
+          const message = JSON.parse(event.data);
+          const promise = message?.rseq === undefined ? undefined : responsePromises[message.rseq];
+          if (promise !== undefined) {
+            if (message.$error)
+              promise.reject(message);
+            else
+              promise.resolve(message);
+            delete responsePromises[message.rseq];
+            return;
+          }
+          processEvent(message);
+        } catch (error) {
+          console.error(error);
+        }
+      });
+      ws.addEventListener('close', () => {
+        ws = null;
+        queue ??= [];
+        window.setTimeout(() => connectWebSocket(wsUrl), 1000);
+      });
+      ws.addEventListener('error', (error) => console.error(error));
+    };
+
+    const waitForOverlayPluginApi = () => {
+      if (!window.OverlayPluginApi?.ready) {
+        window.setTimeout(waitForOverlayPluginApi, 300);
+        return;
+      }
+      window.__OverlayCallback = processEvent;
+      markOverlayReady();
+      flushQueue();
+    };
+
+    const init = () => {
+      if (initialized)
+        return;
+      initialized = true;
+      const wsUrl = new URLSearchParams(window.location.search).get('OVERLAY_WS');
+      if (wsUrl !== null && wsUrl !== '') {
+        connectWebSocket(wsUrl);
+        return;
+      }
+      waitForOverlayPluginApi();
+    };
+
+    window.addOverlayListener = (event, callback) => {
+      init();
+      subscribers[event] ??= [];
+      subscribers[event].push(callback);
+      if (queue === null)
+        sendMessage({ call: 'subscribe', events: [event] });
+    };
+    window.callOverlayHandler = (message) => {
+      init();
+      const request = { ...message, rseq: 0 };
+      if (ws !== null) {
+        request.rseq = responseSequence++;
+        const promise = new Promise((resolve, reject) => {
+          responsePromises[request.rseq] = { resolve, reject };
+        });
+        sendMessage(request);
+        return promise;
+      }
+      return new Promise((resolve, reject) => {
+        sendMessage(request, (data) => {
+          if (data === null) {
+            resolve(data);
+            return;
+          }
+          const parsed = JSON.parse(data);
+          if (parsed.$error)
+            reject(parsed);
+          else
+            resolve(parsed);
+        });
+      });
+    };
+    window.dispatchOverlayEvent = processEvent;
+  }
 
   function readJson(key, fallback) {
     try {
@@ -51,10 +215,14 @@
     window.localStorage.setItem(key, JSON.stringify(value));
   }
 
+  function cleanName(value) {
+    return typeof value === 'string' ? value.trim() : '';
+  }
+
   function normalizeMember(member) {
     return {
-      id: member.id,
-      name: member.name ?? member.Name ?? 'Unknown',
+      id: member.id ?? member.ID ?? '',
+      name: cleanName(member.name ?? member.Name),
       job: Number(member.job ?? member.Job ?? 0),
       inParty: member.inParty ?? member.InParty ?? true,
       rp: undefined,
@@ -94,6 +262,10 @@
   function applyStoredRoles() {
     const used = new Set();
     for (const member of party) {
+      if (member.name === '') {
+        member.rp = undefined;
+        continue;
+      }
       const savedRole = roleByName[member.name];
       if (roles.includes(savedRole) && !used.has(savedRole)) {
         member.rp = savedRole;
@@ -109,7 +281,7 @@
 
     const defaultParty = party.map((member) => ({ ...member, rp: undefined }));
     assignDefaultRoles(defaultParty);
-    const defaultRoleByName = new Map(defaultParty.map((member) => [member.name, member.rp]));
+    const defaultRoleByName = new Map(defaultParty.filter((member) => member.name !== '').map((member) => [member.name, member.rp]));
     for (const member of missingMembers) {
       const preferred = defaultRoleByName.get(member.name);
       if (roles.includes(preferred) && !used.has(preferred)) {
@@ -124,14 +296,16 @@
   }
 
   function saveRoles() {
-    roleByName = Object.fromEntries(party.map((member) => [member.name, member.rp]));
+    roleByName = Object.fromEntries(
+      party.filter((member) => member.name !== '').map((member) => [member.name, member.rp]),
+    );
     writeJson(storageKey, roleByName);
   }
 
   function setParty(rawParty) {
     party = (rawParty ?? [])
       .map(normalizeMember)
-      .filter((member) => member.inParty)
+      .filter((member) => member.inParty && (member.name !== '' || member.job > 0))
       .slice(0, 8);
     applyStoredRoles();
     saveRoles();
@@ -154,6 +328,8 @@
     select.append(emptyOption);
 
     for (const member of party) {
+      if (member.name === '')
+        continue;
       const option = document.createElement('option');
       option.value = member.name;
       option.textContent = member.name;
@@ -220,16 +396,18 @@
       slot.dataset.role = role;
       slot.dataset.groupStart = String(groupStarts.has(role));
       slot.draggable = false;
-      slot.classList.toggle('empty', member === undefined);
+      slot.classList.toggle('empty', member === undefined || member.name === '');
       slot.classList.toggle('duplicate', duplicateRoles.has(role));
       slot.classList.toggle('self', member?.name === currentPlayerName);
       slot.querySelector('.role-chip').textContent = role;
       const memberName = slot.querySelector('.member-name');
-      memberName.textContent = member?.name ?? '未分配';
-      memberName.tabIndex = 0;
-      slot.querySelector('.member-job').textContent = member === undefined ? '' : jobNames[member.job] ?? `Job ${member.job}`;
+      memberName.textContent = member?.name ?? '';
+      memberName.tabIndex = member?.name === undefined || member.name === '' ? -1 : 0;
+      slot.querySelector('.member-job').textContent = member === undefined || member.job <= 0 ? '' : jobNames[member.job] ?? `Job ${member.job}`;
       const select = createMemberSelect(role, member?.name);
       memberName.addEventListener('keydown', (event) => {
+        if (member?.name === undefined || member.name === '')
+          return;
         if (event.key !== 'Enter' && event.key !== ' ')
           return;
         event.preventDefault();
@@ -243,7 +421,9 @@
     const assignedRoleCount = new Set(party.map((member) => member.rp).filter(Boolean)).size;
     const missingRoles = roles.filter((role) => getMemberByRole(role) === undefined);
     partySummary.textContent = party.length > 0 ? `${party.length} 人 / ${assignedRoleCount} 职能` : '等待小队数据';
-    if (duplicateRoles.size > 0)
+    if (party.length === 0)
+      statusText.textContent = overlayConnected ? '已连接 OverlayPlugin，等待小队数据。' : '未获取到小队数据，仅显示职能。';
+    else if (duplicateRoles.size > 0)
       statusText.textContent = `存在重复职能：${[...duplicateRoles].join('/')}`;
     else if (missingRoles.length > 0)
       statusText.textContent = `未分配：${missingRoles.join('/')}`;
@@ -330,28 +510,31 @@
   }
 
   function buildPayload() {
-    return party.map((member) => ({
-      id: member.id,
-      name: member.name,
-      rp: member.rp,
-    }));
+    return party
+      .filter((member) => member.name !== '')
+      .map((member) => ({
+        id: member.id,
+        name: member.name,
+        rp: member.rp,
+      }));
   }
 
   function broadcast() {
     clearTimeout(pendingBroadcastTimer);
-    if (party.length === 0) {
+    const payload = buildPayload();
+    if (payload.length === 0) {
       statusText.textContent = '暂无小队数据，未广播。';
       return;
     }
-    const payload = buildPayload();
-    if (hasOverlayApi()) {
+    if (overlayConnected && hasOverlayApi()) {
       window.callOverlayHandler({
         call: 'broadcast',
         source: 'stringRuntimeJS',
         msg: { party: payload },
       });
     } else {
-      console.info('String Runtime mock broadcast', payload);
+      statusText.textContent = 'OverlayPlugin 未连接，未广播。';
+      return;
     }
     const now = new Date();
     lastBroadcastText.textContent = `已广播 ${now.toLocaleTimeString('zh-CN', { hour12: false })}`;
@@ -371,8 +554,45 @@
   }
 
   function handlePrimaryPlayer(event) {
-    currentPlayerName = event?.charName ?? event?.name ?? '';
+    currentPlayerName = cleanName(event?.charName ?? event?.name);
     render();
+  }
+
+  function getCombatantId(combatant) {
+    const id = combatant.ID ?? combatant.id;
+    if (typeof id === 'number')
+      return id.toString(16).toUpperCase().padStart(8, '0');
+    return id?.toString() ?? '';
+  }
+
+  function partyFromCombatants(combatants) {
+    const knownJobs = new Set([...tankJobs, ...healerJobs, ...dpsJobs]);
+    const players = (combatants ?? [])
+      .filter((combatant) => knownJobs.has(Number(combatant.Job ?? combatant.job ?? 0)))
+      .map((combatant) => ({
+        id: getCombatantId(combatant),
+        name: cleanName(combatant.Name ?? combatant.name),
+        job: Number(combatant.Job ?? combatant.job ?? 0),
+        inParty: true,
+      }))
+      .filter((member) => member.name !== '');
+
+    if (players.length === 0 || players.length > 8)
+      return [];
+    return players;
+  }
+
+  async function requestPartySnapshot() {
+    if (!overlayConnected || !hasOverlayApi())
+      return;
+    try {
+      const result = await window.callOverlayHandler({ call: 'getCombatants' });
+      const snapshotParty = partyFromCombatants(result?.combatants);
+      if (snapshotParty.length > 0 && party.length === 0)
+        setParty(snapshotParty);
+    } catch (error) {
+      console.debug('String Runtime getCombatants failed', error);
+    }
   }
 
   function setupOverlay() {
@@ -388,33 +608,35 @@
 
     window.stringRuntimeDebug = { setParty, buildPayload, swapRoleSlots, defaultSort };
 
-    if (!hasOverlayApi()) {
-      connectionState.textContent = '演示';
-      connectionState.className = 'state state-mock';
-      setParty([
-        { id: 'E000001', name: 'Alpha Tank', job: 21, inParty: true },
-        { id: 'E000002', name: 'Bravo Tank', job: 32, inParty: true },
-        { id: 'E000003', name: 'Calm Healer', job: 33, inParty: true },
-        { id: 'E000004', name: 'Delta Healer', job: 40, inParty: true },
-        { id: 'E000005', name: 'Echo Viper', job: 41, inParty: true },
-        { id: 'E000006', name: 'Foxtrot Samurai', job: 34, inParty: true },
-        { id: 'E000007', name: 'Gamma Dancer', job: 38, inParty: true },
-        { id: 'E000008', name: 'Hotel Pict', job: 42, inParty: true },
-      ]);
-      handlePrimaryPlayer({ charName: 'Echo Viper' });
-      return;
-    }
-
-    connectionState.textContent = '已连接';
-    connectionState.className = 'state state-live';
+    render();
+    installOverlayApi();
+    connectionState.textContent = '连接中';
+    connectionState.className = 'state state-pending';
     window.addOverlayListener('PartyChanged', (event) => setParty(event.party));
     window.addOverlayListener('ChangePrimaryPlayer', handlePrimaryPlayer);
     window.addOverlayListener('BroadcastMessage', handleBroadcastMessage);
-    window.callOverlayHandler({
-      call: 'broadcast',
-      source: 'stringRuntimeJS',
-      msg: { text: 'ready' },
+    onOverlayReady(() => {
+      connectionState.textContent = '已连接';
+      connectionState.className = 'state state-live';
+      render();
+      window.callOverlayHandler({
+        call: 'broadcast',
+        source: 'stringRuntimeJS',
+        msg: { text: 'ready' },
+      });
+      requestPartySnapshot();
+      window.setInterval(() => {
+        if (party.length === 0)
+          requestPartySnapshot();
+      }, 3000);
     });
+    window.setTimeout(() => {
+      if (overlayConnected)
+        return;
+      connectionState.textContent = '离线';
+      connectionState.className = 'state state-idle';
+      render();
+    }, 1800);
     if (typeof window.startOverlayEvents === 'function')
       window.startOverlayEvents();
   }

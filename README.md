@@ -13,6 +13,13 @@
 4. 进入副本后检查 8 人列表；鼠标移入悬浮窗后可拖拽玩家换位，也可以点击玩家名下拉调整 `MT/ST/H1/H2/D1/D2/D3/D4`。
 5. 点击“广播”，或打开“自动广播”。
 
+## 连接状态
+
+- `已连接`：已经连到 OverlayPlugin，进入小队/副本后会自动读取 8 人列表。
+- `连接中` / `离线`：没有拿到 OverlayPlugin API，此时只显示 `MT/ST/H1/H2/D1-D4` 职能占位，不会显示演示姓名，也不会广播。
+
+如果在 ACT 里一直是 `离线`，优先用 OverlayPlugin 的 URL Generator/WS Server 方式创建悬浮窗，确保 URL 带有 `OVERLAY_WS` 参数，或使用会注入 OverlayPlugin API 的悬浮窗类型。
+
 ## 发布范围
 
 这个仓库只发布职能分配悬浮窗的静态文件，不包含 cactbot 触发器、ACT 日志或私有配置。
