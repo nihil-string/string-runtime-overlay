@@ -7,7 +7,7 @@
 3. 地址填写：
 
    ```text
-   https://mulongsheng.github.io/string-runtime-overlay/
+   https://nihil-string.github.io/string-runtime-overlay/
    ```
 
 4. 进入副本后检查 8 人列表；鼠标移入悬浮窗后可拖拽玩家换位，也可以点击玩家名下拉调整 `MT/ST/H1/H2/D1/D2/D3/D4`。
