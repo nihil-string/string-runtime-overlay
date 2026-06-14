@@ -4,7 +4,6 @@
   const roles = ['MT', 'ST', 'H1', 'H2', 'D1', 'D2', 'D3', 'D4'];
   const groupStarts = new Set(['MT', 'H1', 'D1']);
   const storageKey = 'string-runtime-role-map-v1';
-  const autoBroadcastKey = 'string-runtime-auto-broadcast-v1';
 
   const tankJobs = [1, 3, 19, 21, 32, 37];
   const healerJobs = [6, 24, 28, 33, 40];
@@ -22,7 +21,6 @@
   const slotTemplate = document.getElementById('roleSlotTemplate');
   const defaultSortButton = document.getElementById('defaultSortButton');
   const broadcastButton = document.getElementById('broadcastButton');
-  const autoBroadcastInput = document.getElementById('autoBroadcastInput');
   const statusText = document.getElementById('statusText');
   const lastBroadcastText = document.getElementById('lastBroadcastText');
   const partySummary = document.getElementById('partySummary');
@@ -540,10 +538,8 @@
     lastBroadcastText.textContent = `已广播 ${now.toLocaleTimeString('zh-CN', { hour12: false })}`;
   }
 
-  function scheduleBroadcast(force = false) {
+  function scheduleBroadcast() {
     clearTimeout(pendingBroadcastTimer);
-    if (!force && !autoBroadcastInput.checked)
-      return;
     pendingBroadcastTimer = setTimeout(broadcast, 120);
   }
 
@@ -596,13 +592,6 @@
   }
 
   function setupOverlay() {
-    autoBroadcastInput.checked = window.localStorage.getItem(autoBroadcastKey) === 'true';
-    autoBroadcastInput.addEventListener('change', () => {
-      window.localStorage.setItem(autoBroadcastKey, String(autoBroadcastInput.checked));
-      if (autoBroadcastInput.checked)
-        scheduleBroadcast(true);
-    });
-
     defaultSortButton.addEventListener('click', defaultSort);
     broadcastButton.addEventListener('click', broadcast);
 
