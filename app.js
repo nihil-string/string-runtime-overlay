@@ -21,6 +21,8 @@
   const slotTemplate = document.getElementById('roleSlotTemplate');
   const defaultSortButton = document.getElementById('defaultSortButton');
   const broadcastButton = document.getElementById('broadcastButton');
+  const autoMarkToggle = document.getElementById('autoMarkToggle');
+  const autoMarkSwitch = autoMarkToggle?.closest('.session-mark');
   const statusText = document.getElementById('statusText');
   const lastBroadcastText = document.getElementById('lastBroadcastText');
   const partySummary = document.getElementById('partySummary');
@@ -31,6 +33,7 @@
   let pendingBroadcastTimer;
   let pointerDragState;
   let currentPlayerName = '';
+  let autoMarkArmed = false;
   let overlayConnected = false;
   const overlayReadyCallbacks = [];
 
@@ -517,25 +520,33 @@
       }));
   }
 
+  function setAutoMarkArmed(value) {
+    autoMarkArmed = value === true;
+    if (autoMarkToggle !== null)
+      autoMarkToggle.checked = autoMarkArmed;
+    autoMarkSwitch?.classList.toggle('mark-armed', autoMarkArmed);
+    statusText.textContent = autoMarkArmed ? '本次会话已启用自动标点。' : '本次会话自动标点已关闭。';
+    broadcast();
+  }
+
   function broadcast() {
     clearTimeout(pendingBroadcastTimer);
     const payload = buildPayload();
-    if (payload.length === 0) {
-      statusText.textContent = '暂无小队数据，未广播。';
-      return;
-    }
     if (overlayConnected && hasOverlayApi()) {
       window.callOverlayHandler({
         call: 'broadcast',
         source: 'stringRuntimeJS',
-        msg: { party: payload },
+        msg: { party: payload, autoMark: autoMarkArmed },
       });
     } else {
       statusText.textContent = 'OverlayPlugin 未连接，未广播。';
       return;
     }
     const now = new Date();
-    lastBroadcastText.textContent = `已广播 ${now.toLocaleTimeString('zh-CN', { hour12: false })}`;
+    const markText = autoMarkArmed ? ' 标记开' : '';
+    lastBroadcastText.textContent = `已广播 ${now.toLocaleTimeString('zh-CN', { hour12: false })}${markText}`;
+    if (payload.length === 0)
+      statusText.textContent = '暂无小队数据，仅广播本次标点状态。';
   }
 
   function scheduleBroadcast() {
@@ -594,8 +605,9 @@
   function setupOverlay() {
     defaultSortButton.addEventListener('click', defaultSort);
     broadcastButton.addEventListener('click', broadcast);
+    autoMarkToggle.addEventListener('change', () => setAutoMarkArmed(autoMarkToggle.checked));
 
-    window.stringRuntimeDebug = { setParty, buildPayload, swapRoleSlots, defaultSort };
+    window.stringRuntimeDebug = { setParty, buildPayload, swapRoleSlots, defaultSort, setAutoMarkArmed };
 
     render();
     installOverlayApi();

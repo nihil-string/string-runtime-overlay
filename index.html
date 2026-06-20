@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>String 职能分配</title>
   <link rel="icon" href="data:,">
-  <link rel="stylesheet" href="./style.css?v=20260611-1">
+  <link rel="stylesheet" href="./style.css?v=20260621-1">
 </head>
 <body>
   <main class="shell">
@@ -20,6 +20,10 @@
     <section class="toolbar" aria-label="职能分配操作">
       <button id="defaultSortButton" class="button" type="button" title="按职业默认顺序重新分配">重排</button>
       <button id="broadcastButton" class="button button-primary" type="button" title="广播当前 MT/ST/H1/H2/D1-D4 分配">广播</button>
+      <label class="switch session-mark" title="只在本次 ACT/悬浮窗会话启用自动标点，重启或刷新后自动关闭">
+        <input id="autoMarkToggle" type="checkbox">
+        <span>标记</span>
+      </label>
     </section>
 
     <section class="role-board" aria-label="当前职能分配">
@@ -43,6 +47,6 @@
     </div>
   </template>
 
-  <script src="./app.js?v=20260614-1"></script>
+  <script src="./app.js?v=20260621-1"></script>
 </body>
 </html>
