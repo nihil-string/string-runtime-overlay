@@ -166,12 +166,6 @@ p {
   accent-color: var(--accent);
 }
 
-.session-mark.mark-armed {
-  color: #ffe1e1;
-  border-color: rgba(255, 127, 127, 0.8);
-  background: rgba(255, 127, 127, 0.18);
-}
-
 .role-board {
   width: 18em;
   max-width: calc(100vw - 0.4em);
