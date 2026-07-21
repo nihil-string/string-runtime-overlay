@@ -140,6 +140,8 @@
   let compactTimer;
   let selectInteraction;
   let selectInteractionTimer;
+  let selectResizePending = false;
+  let selectResizeResetFallback = false;
   let resizeScheduleToken = 0;
   let resizeRequestSequence = 0;
   let resizeQueue = Promise.resolve();
@@ -994,6 +996,11 @@
   function scheduleOverlayResize(resetFallback = false) {
     if (resetFallback)
       document.documentElement.classList.remove('resize-fallback');
+    if (selectInteraction !== undefined) {
+      selectResizePending = true;
+      selectResizeResetFallback ||= resetFallback;
+      return;
+    }
     const scheduleToken = ++resizeScheduleToken;
     window.requestAnimationFrame(() => window.requestAnimationFrame(() => {
       if (scheduleToken !== resizeScheduleToken || typeof window.callOverlayHandler !== 'function')
@@ -1042,27 +1049,42 @@
     }, 180);
   }
 
-  function endSelectInteraction(select) {
+  function flushSelectResize() {
+    if (!selectResizePending)
+      return;
+    const resetFallback = selectResizeResetFallback;
+    selectResizePending = false;
+    selectResizeResetFallback = false;
+    scheduleOverlayResize(resetFallback);
+  }
+
+  function endSelectInteraction(select, flushResize = true) {
     if (selectInteraction !== select)
       return;
     selectInteraction = undefined;
     clearTimeout(selectInteractionTimer);
-    scheduleCompactMode();
+    if (flushResize)
+      flushSelectResize();
   }
 
   function beginSelectInteraction(select) {
     selectInteraction = select;
     clearTimeout(compactTimer);
     clearTimeout(selectInteractionTimer);
-    selectInteractionTimer = window.setTimeout(() => endSelectInteraction(select), 30000);
+    resizeScheduleToken += 1;
+    selectResizePending = true;
+    selectInteractionTimer = window.setTimeout(() => endSelectInteraction(select, false), 30000);
   }
 
   function bindSelectInteraction(select) {
     select.addEventListener('pointerdown', () => beginSelectInteraction(select));
     select.addEventListener('change', () => window.setTimeout(() => endSelectInteraction(select), 0));
-    select.addEventListener('blur', () => endSelectInteraction(select));
     select.addEventListener('keydown', (event) => {
-      if (event.key === 'Escape')
+      const opensPicker = event.key === 'Enter' || event.key === ' ' || event.key === 'F4' ||
+        (event.altKey && event.key === 'ArrowDown');
+      if (opensPicker)
+        beginSelectInteraction(select);
+      else if (event.key === 'Escape')
         window.setTimeout(() => endSelectInteraction(select), 0);
     });
   }
@@ -1477,9 +1499,21 @@
     }
     for (const select of document.querySelectorAll('select'))
       bindSelectInteraction(select);
+    document.addEventListener('pointerdown', (event) => {
+      const activeSelect = selectInteraction;
+      if (activeSelect === undefined)
+        return;
+      if (event.target instanceof Node && activeSelect.contains(event.target))
+        return;
+      endSelectInteraction(activeSelect);
+    }, true);
     appShell.addEventListener('pointerenter', () => {
       pointerInside = true;
       clearTimeout(compactTimer);
+      if (selectInteraction !== undefined)
+        endSelectInteraction(selectInteraction);
+      else
+        flushSelectResize();
       setCompactMode(false);
     });
     appShell.addEventListener('pointerleave', () => {
