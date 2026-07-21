@@ -8,9 +8,12 @@
     healer: ['H1', 'H2'],
     dps: ['D1', 'D2', 'D3', 'D4'],
   };
-  const storageKey = 'string-runtime-role-map-v1';
-  const dancingMadUltimateZoneId = 1363;
   const demoMode = new URLSearchParams(window.location.search).get('demo') === '1';
+  const storageKey = demoMode ? 'string-runtime-role-map-demo-v1' : 'string-runtime-role-map-v1';
+  const configStorageKey = demoMode
+    ? 'string-runtime-encounter-config-demo-v1'
+    : 'string-runtime-encounter-config-v1';
+  const dancingMadUltimateZoneId = 1363;
   const safeEncounterConfig = {
     MyDMU_AutoMarkV5: false,
     MyDMU_LocalMarkV3: false,
@@ -74,6 +77,20 @@
     'MyDMU_P3TargetMarkV3',
     'MyDMU_P4BuffMarkV3',
   ]);
+  const priorityConfigKeys = new Set([
+    'MyDMU_P3TargetFirstPriority',
+    'MyDMU_P3TargetSecondPriority',
+    'MyDMU_P3TargetThirdPriority',
+  ]);
+  const completeRoleOrderConfigKeys = new Set([
+    'MyDMU_P1BeamOrder',
+    'MyDMU_P3FireBuffOrder',
+    'MyDMU_P5SymphonyOrder',
+  ]);
+  const hiddenSelectValues = {
+    MyDMU_P4BuffChatChannel: new Set(['e', 'p']),
+    MyDMU_P5MitigationChannel: new Set(['e', 'p']),
+  };
 
   const tankJobs = [1, 3, 19, 21, 32, 37];
   const healerJobs = [6, 24, 28, 33, 40];
@@ -126,6 +143,8 @@
   const p2EightTowerPreset = document.getElementById('p2EightTowerPreset');
   const phaseTabs = [...document.querySelectorAll('[data-phase]')];
   const phasePanels = [...document.querySelectorAll('[data-phase-panel]')];
+  let localConfigStore = readLocalConfigStore();
+  const initialLocalProfile = getLocalActiveProfile(localConfigStore);
 
   let party = [];
   let roleByName = readJson(storageKey, {});
@@ -150,8 +169,15 @@
   let configDirty = false;
   let configSaveTimer;
   let configSavePromise = Promise.resolve();
+  let configMutationQueue = Promise.resolve();
   let configFormInitialized = false;
   let configBackendAvailable = false;
+  let activeBackendInstanceId = '';
+  const retiredBackendInstanceIds = new Set();
+  let latestBackendRevision = -1;
+  let backendConfigProfiles = [];
+  let bridgeSyncInProgress = false;
+  let configRequestPromise;
   let demoDispatchOverlayEvent;
   let encounterState = {
     zoneId: 0,
@@ -161,12 +187,12 @@
     locked: false,
     revision: 0,
     config: { ...safeEncounterConfig },
-    draftConfig: { ...safeEncounterConfig },
-    activeProfileId: 'default',
-    profiles: [{ id: 'default', name: '默认配置' }],
+    draftConfig: { ...initialLocalProfile.config },
+    activeProfileId: initialLocalProfile.id,
+    profiles: localConfigStore.profiles.map(({ id, name }) => ({ id, name })),
     safeDefaults: { ...safeEncounterConfig },
-    configSchemaVersion: 0,
-    features: {},
+    configSchemaVersion: 3,
+    features: { partyChatEnabled: true },
     hasPendingChanges: false,
   };
   const overlayReadyCallbacks = [];
@@ -221,8 +247,10 @@
     ];
     let activeProfileId = 'static';
     let draftConfig = { ...demoProfiles.find((profile) => profile.id === activeProfileId).config };
+    const demoInstanceId = `demo-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
     let state = {
       ...encounterState,
+      instanceId: demoInstanceId,
       configSchemaVersion: 3,
       features: { partyChatEnabled: true },
       draftConfig: { ...draftConfig },
@@ -390,6 +418,8 @@
 
     let initialized = false;
     let ws = null;
+    let webSocketMode = false;
+    let webSocketOpened = false;
     let queue = [];
     let responseSequence = 0;
     const responsePromises = {};
@@ -407,11 +437,13 @@
     };
 
     const sendMessage = (message, callback) => {
-      if (ws !== null) {
-        if (queue !== null)
-          queue.push(message);
-        else
+      if (webSocketMode) {
+        if (ws?.readyState === WebSocket.OPEN && queue === null)
           ws.send(JSON.stringify(message));
+        else {
+          queue ??= [];
+          queue.push(message);
+        }
         return;
       }
 
@@ -436,12 +468,25 @@
     };
 
     const connectWebSocket = (wsUrl) => {
-      ws = new WebSocket(wsUrl);
-      ws.addEventListener('open', () => {
+      const socket = new WebSocket(wsUrl);
+      ws = socket;
+      socket.addEventListener('open', () => {
+        if (ws !== socket)
+          return;
+        const reconnect = webSocketOpened;
+        webSocketOpened = true;
         markOverlayReady();
         flushQueue();
+        connectionState.textContent = '已连接';
+        connectionState.className = 'state state-live';
+        if (reconnect) {
+          configBackendAvailable = false;
+          render();
+          renderConfigState();
+          void requestConfigState();
+        }
       });
-      ws.addEventListener('message', (event) => {
+      socket.addEventListener('message', (event) => {
         try {
           const message = JSON.parse(event.data);
           const promise = message?.rseq === undefined ? undefined : responsePromises[message.rseq];
@@ -458,12 +503,25 @@
           console.error(error);
         }
       });
-      ws.addEventListener('close', () => {
+      socket.addEventListener('close', () => {
+        if (ws !== socket)
+          return;
         ws = null;
-        queue ??= [];
+        queue = [];
+        for (const [sequence, promise] of Object.entries(responsePromises)) {
+          promise.reject(new Error('OverlayPlugin WebSocket 已断开'));
+          delete responsePromises[sequence];
+        }
+        overlayConnected = false;
+        configBackendAvailable = false;
+        resetBackendRevisionTracking();
+        connectionState.textContent = '重连中';
+        connectionState.className = 'state state-pending';
+        render();
+        renderConfigState();
         window.setTimeout(() => connectWebSocket(wsUrl), 1000);
       });
-      ws.addEventListener('error', (error) => console.error(error));
+      socket.addEventListener('error', (error) => console.error(error));
     };
 
     const waitForOverlayPluginApi = () => {
@@ -482,6 +540,7 @@
       initialized = true;
       const wsUrl = new URLSearchParams(window.location.search).get('OVERLAY_WS');
       if (wsUrl !== null && wsUrl !== '') {
+        webSocketMode = true;
         connectWebSocket(wsUrl);
         return;
       }
@@ -498,10 +557,25 @@
     window.callOverlayHandler = (message) => {
       init();
       const request = { ...message, rseq: 0 };
-      if (ws !== null) {
+      if (webSocketMode) {
         request.rseq = responseSequence++;
         const promise = new Promise((resolve, reject) => {
-          responsePromises[request.rseq] = { resolve, reject };
+          const timeout = window.setTimeout(() => {
+            delete responsePromises[request.rseq];
+            if (queue !== null)
+              queue = queue.filter((item) => item?.rseq !== request.rseq);
+            reject(new Error('OverlayPlugin WebSocket 请求超时'));
+          }, 10000);
+          responsePromises[request.rseq] = {
+            resolve: (value) => {
+              clearTimeout(timeout);
+              resolve(value);
+            },
+            reject: (error) => {
+              clearTimeout(timeout);
+              reject(error);
+            },
+          };
         });
         sendMessage(request);
         return promise;
@@ -534,6 +608,256 @@
 
   function writeJson(key, value) {
     window.localStorage.setItem(key, JSON.stringify(value));
+  }
+
+  function normalizeLocalConfig(input, fallback = safeEncounterConfig) {
+    const source = input !== null && typeof input === 'object' && !Array.isArray(input)
+      ? input
+      : {};
+    const normalized = { ...safeEncounterConfig };
+    for (const [key, defaultValue] of Object.entries(safeEncounterConfig)) {
+      const fallbackValue = fallback?.[key];
+      if (typeof fallbackValue === typeof defaultValue)
+        normalized[key] = fallbackValue;
+      const value = source[key];
+      if (typeof defaultValue === 'boolean' && typeof value === 'boolean')
+        normalized[key] = value;
+      else if (typeof defaultValue === 'string' && typeof value === 'string' &&
+        configControlByKey[key]?.tagName !== 'SELECT') {
+        normalized[key] = value.trim();
+      }
+    }
+    for (const control of configControls) {
+      const key = control.dataset.configKey;
+      const value = source[key];
+      if (control.type === 'checkbox') {
+        if (typeof value === 'boolean')
+          normalized[key] = value;
+        continue;
+      }
+      if (typeof value !== 'string')
+        continue;
+      const text = value.trim();
+      if (control.tagName === 'SELECT') {
+        const options = [...control.options].map((option) => option.value);
+        if (options.includes(text))
+          normalized[key] = text;
+        else if (options.includes(String(fallback?.[key] ?? '')))
+          normalized[key] = String(fallback[key]);
+        else
+          normalized[key] = safeEncounterConfig[key];
+        continue;
+      }
+      const maximumLength = Number(control.maxLength);
+      normalized[key] = maximumLength > 0 ? text.slice(0, maximumLength) : text;
+    }
+    for (const [key, values] of Object.entries(hiddenSelectValues)) {
+      if (!values.has(normalized[key]))
+        normalized[key] = values.has(fallback?.[key]) ? fallback[key] : safeEncounterConfig[key];
+    }
+    return normalized;
+  }
+
+  function normalizeRoleSequence(value, key, requireAllRoles) {
+    const parts = String(value ?? '').trim().toUpperCase()
+      .split(/[\s,，/|>＞、;；]+/u)
+      .filter((part) => part !== '');
+    const unknownRole = parts.find((part) => !roles.includes(part));
+    if (unknownRole !== undefined)
+      throw new Error(`${key} 包含未知职能：${unknownRole}`);
+    const normalized = [...new Set(parts)];
+    if (requireAllRoles && (parts.length !== roles.length || normalized.length !== roles.length))
+      throw new Error(`${key} 必须且只能包含全部 8 个职能`);
+    if (!requireAllRoles && normalized.length === 0)
+      throw new Error(`${key} 至少需要一个职能`);
+    return normalized.join('/');
+  }
+
+  function normalizeLocalConfigForSave(input, fallback = safeEncounterConfig) {
+    const normalized = normalizeLocalConfig(input, fallback);
+    for (const key of completeRoleOrderConfigKeys)
+      normalized[key] = normalizeRoleSequence(input?.[key] ?? normalized[key], key, true);
+    for (const key of priorityConfigKeys)
+      normalized[key] = normalizeRoleSequence(input?.[key] ?? normalized[key], key, false);
+    return normalized;
+  }
+
+  function normalizeLocalProfileName(value) {
+    const name = typeof value === 'string' ? value.trim() : '';
+    if (name === '')
+      throw new Error('请输入配置名称');
+    if (name.length > 32 || [...name].some((character) => /[\u0000-\u001F\u007F]/u.test(character)))
+      throw new Error('配置名称无效');
+    return name;
+  }
+
+  function createDefaultLocalConfigStore() {
+    return {
+      version: 1,
+      revision: 0,
+      activeProfileId: 'default',
+      pendingBridgeSync: false,
+      profiles: [{ id: 'default', name: '默认配置', config: { ...safeEncounterConfig } }],
+    };
+  }
+
+  function readLocalConfigStore() {
+    const saved = readJson(configStorageKey, undefined);
+    if (saved === undefined || saved === null || typeof saved !== 'object' || Array.isArray(saved))
+      return createDefaultLocalConfigStore();
+
+    const profiles = [];
+    const ids = new Set();
+    const names = new Set();
+    for (const item of Array.isArray(saved.profiles) ? saved.profiles.slice(0, 20) : []) {
+      const id = typeof item?.id === 'string' ? item.id.trim() : '';
+      let name;
+      try {
+        name = normalizeLocalProfileName(item?.name);
+      } catch {
+        continue;
+      }
+      const normalizedName = name.toLocaleLowerCase('zh-CN');
+      if (!/^[A-Za-z0-9_.:-]{1,80}$/u.test(id) || ids.has(id) || names.has(normalizedName))
+        continue;
+      ids.add(id);
+      names.add(normalizedName);
+      profiles.push({
+        id,
+        name,
+        config: normalizeLocalConfig(item?.config),
+      });
+    }
+    if (profiles.length === 0)
+      return createDefaultLocalConfigStore();
+
+    const activeProfileId = profiles.some((profile) => profile.id === saved.activeProfileId)
+      ? saved.activeProfileId
+      : profiles[0].id;
+    return {
+      version: 1,
+      revision: Number.isSafeInteger(saved.revision) && saved.revision >= 0 ? saved.revision : 0,
+      activeProfileId,
+      pendingBridgeSync: saved.pendingBridgeSync === true,
+      profiles,
+    };
+  }
+
+  function getLocalActiveProfile(store = localConfigStore) {
+    return store.profiles.find((profile) => profile.id === store.activeProfileId) ?? store.profiles[0];
+  }
+
+  function persistLocalConfigStore() {
+    writeJson(configStorageKey, localConfigStore);
+  }
+
+  function touchLocalConfig() {
+    localConfigStore.revision = Number.isSafeInteger(localConfigStore.revision)
+      ? localConfigStore.revision + 1
+      : 1;
+  }
+
+  function saveLocalActiveConfig(config, pendingBridgeSync = true) {
+    const profile = getLocalActiveProfile();
+    profile.config = normalizeLocalConfigForSave(config, profile.config);
+    localConfigStore.pendingBridgeSync ||= pendingBridgeSync;
+    touchLocalConfig();
+    persistLocalConfigStore();
+    encounterState.draftConfig = { ...profile.config };
+    encounterState.hasPendingChanges = encounterState.inEncounter &&
+      JSON.stringify(encounterState.config) !== JSON.stringify(profile.config);
+    return profile.config;
+  }
+
+  function selectLocalConfigProfile(profileId) {
+    const profile = localConfigStore.profiles.find((item) => item.id === profileId);
+    if (profile === undefined)
+      throw new Error('本地配置档案不存在');
+    localConfigStore.activeProfileId = profile.id;
+    localConfigStore.pendingBridgeSync = true;
+    touchLocalConfig();
+    persistLocalConfigStore();
+    updateEncounterFromLocal(true);
+  }
+
+  function saveLocalConfigProfile(name, config) {
+    const normalizedName = normalizeLocalProfileName(name);
+    const sourceConfig = { ...getLocalActiveProfile().config, ...config };
+    let profile = localConfigStore.profiles.find((item) =>
+      item.name.localeCompare(normalizedName, 'zh-CN', { sensitivity: 'accent' }) === 0);
+    if (profile === undefined) {
+      if (localConfigStore.profiles.length >= 20)
+        throw new Error('配置档案最多保存 20 个');
+      profile = {
+        id: `local-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`,
+        name: normalizedName,
+        config: { ...safeEncounterConfig },
+      };
+      localConfigStore.profiles.push(profile);
+    }
+    profile.name = normalizedName;
+    profile.config = normalizeLocalConfigForSave(sourceConfig, getLocalActiveProfile().config);
+    localConfigStore.activeProfileId = profile.id;
+    localConfigStore.pendingBridgeSync = true;
+    touchLocalConfig();
+    persistLocalConfigStore();
+    updateEncounterFromLocal(true);
+  }
+
+  function resetLocalConfigProfile() {
+    const profile = getLocalActiveProfile();
+    profile.config = { ...safeEncounterConfig };
+    localConfigStore.pendingBridgeSync = true;
+    touchLocalConfig();
+    persistLocalConfigStore();
+    updateEncounterFromLocal(true);
+  }
+
+  function updateEncounterFromLocal(syncForm = false) {
+    const profile = getLocalActiveProfile();
+    const profiles = configBackendAvailable ? [...backendConfigProfiles] : [];
+    for (const localProfile of localConfigStore.profiles) {
+      const existingIndex = profiles.findIndex((item) => item.id === localProfile.id);
+      const metadata = { id: localProfile.id, name: localProfile.name };
+      if (existingIndex === -1)
+        profiles.push(metadata);
+      else
+        profiles[existingIndex] = metadata;
+    }
+    encounterState = {
+      ...encounterState,
+      draftConfig: { ...profile.config },
+      activeProfileId: profile.id,
+      profiles,
+      features: { ...encounterState.features, partyChatEnabled: true },
+      hasPendingChanges: encounterState.inEncounter &&
+        JSON.stringify(encounterState.config) !== JSON.stringify(profile.config),
+    };
+    renderProfileOptions();
+    if (syncForm)
+      writeConfigToForm(profile.config);
+    renderConfigState();
+  }
+
+  function rememberBackendStateLocally(state) {
+    const activeProfileId = typeof state?.activeProfileId === 'string'
+      ? state.activeProfileId
+      : 'default';
+    const profileMeta = Array.isArray(state?.profiles)
+      ? state.profiles.find((profile) => profile.id === activeProfileId)
+      : undefined;
+    const name = typeof profileMeta?.name === 'string' && profileMeta.name.trim() !== ''
+      ? profileMeta.name.trim()
+      : '默认配置';
+    const config = normalizeLocalConfig(state?.draftConfig ?? state?.config);
+    localConfigStore.profiles = localConfigStore.profiles.filter((profile) =>
+      profile.id !== activeProfileId &&
+      profile.name.localeCompare(name, 'zh-CN', { sensitivity: 'accent' }) !== 0);
+    localConfigStore.profiles.push({ id: activeProfileId, name, config });
+    localConfigStore.activeProfileId = activeProfileId;
+    localConfigStore.pendingBridgeSync = false;
+    touchLocalConfig();
+    persistLocalConfigStore();
   }
 
   function cleanName(value) {
@@ -1003,7 +1327,8 @@
     }
     const scheduleToken = ++resizeScheduleToken;
     window.requestAnimationFrame(() => window.requestAnimationFrame(() => {
-      if (scheduleToken !== resizeScheduleToken || typeof window.callOverlayHandler !== 'function')
+      if (scheduleToken !== resizeScheduleToken || !overlayConnected ||
+        typeof window.callOverlayHandler !== 'function')
         return;
       const mode = currentLayoutMode();
       const requested = measureOverlayLayout();
@@ -1121,13 +1446,10 @@
   }
 
   function readConfigFromForm() {
-    const partyChatSupported = encounterState.features?.partyChatEnabled === true;
-    return Object.fromEntries(configControls
-      .filter((control) => control.dataset.configKey !== 'MyDMU_PartyChatEnabled' || partyChatSupported)
-      .map((control) => [
+    return Object.fromEntries(configControls.map((control) => [
       control.dataset.configKey,
       control.type === 'checkbox' ? control.checked : control.value.trim(),
-      ]));
+    ]));
   }
 
   function p2EightTowerPresetFor(values) {
@@ -1163,13 +1485,27 @@
     scheduleDraftSave();
   }
 
+  function getVisibleConfigProfiles() {
+    const profiles = configBackendAvailable ? [...backendConfigProfiles] : [];
+    for (const localProfile of localConfigStore.profiles) {
+      const existingIndex = profiles.findIndex((profile) => profile.id === localProfile.id);
+      const metadata = { id: localProfile.id, name: localProfile.name };
+      if (existingIndex === -1)
+        profiles.push(metadata);
+      else
+        profiles[existingIndex] = metadata;
+    }
+    return profiles;
+  }
+
   function getActiveProfile() {
-    return encounterState.profiles.find((profile) => profile.id === encounterState.activeProfileId);
+    return getVisibleConfigProfiles().find((profile) => profile.id === encounterState.activeProfileId) ??
+      getLocalActiveProfile();
   }
 
   function renderProfileOptions() {
     const selectedId = encounterState.activeProfileId;
-    configProfileSelect.replaceChildren(...encounterState.profiles.map((profile) => {
+    configProfileSelect.replaceChildren(...getVisibleConfigProfiles().map((profile) => {
       const option = document.createElement('option');
       option.value = profile.id;
       option.textContent = profile.name;
@@ -1183,23 +1519,23 @@
   }
 
   function renderConfigState() {
-    const editable = configBackendAvailable && !encounterState.locked;
-    const canApply = editable && encounterState.inEncounter;
+    const editable = !encounterState.locked;
     const activeProfile = getActiveProfile();
-    const hasPendingChanges = configDirty || encounterState.hasPendingChanges;
+    const hasPendingBridgeSync = configDirty || localConfigStore.pendingBridgeSync;
+    const hasPendingChanges = hasPendingBridgeSync || encounterState.hasPendingChanges;
     configPanel.classList.toggle('locked', encounterState.locked);
     for (const control of configControls) {
       const key = control.dataset.configKey;
-      const supported = key !== 'MyDMU_PartyChatEnabled' ||
-        encounterState.features?.partyChatEnabled === true;
       const combatDisable = encounterState.locked &&
         control.type === 'checkbox' && combatDisableKeys.has(key);
-      const canDisableInCombat = configBackendAvailable && supported && combatDisable &&
+      const canDisableInCombat = configBackendAvailable && combatDisable &&
         isCombatDisableEnabled(key);
       if (combatDisable)
-        control.checked = canDisableInCombat;
-      control.disabled = !supported || (!editable && !canDisableInCombat);
-      control.title = supported ? '' : '需要更新 StringDownloader 后使用';
+        control.checked = isCombatDisableEnabled(key);
+      control.disabled = !editable && !canDisableInCombat;
+      control.title = control.disabled && encounterState.locked
+        ? '战斗中仅可关闭已开启的标点或小队消息'
+        : '';
     }
     if (p2EightTowerPreset !== null)
       p2EightTowerPreset.disabled = !editable;
@@ -1207,14 +1543,18 @@
     profileNameInput.disabled = !editable;
     saveProfileButton.disabled = !editable || profileNameInput.value.trim() === '';
     restoreDefaultsButton.disabled = !editable;
-    applyConfigButton.disabled = !canApply || !hasPendingChanges;
-    applyConfigButton.textContent = encounterState.inEncounter ? '应用本次' : '进本后可应用';
-    applyConfigButton.title = encounterState.inEncounter ? '' : '进入绝妖星后可应用到当前副本';
+    applyConfigButton.disabled = !editable;
+    applyConfigButton.textContent = configBackendAvailable && encounterState.inEncounter
+      ? '保存并生效'
+      : '保存设置';
+    applyConfigButton.title = '';
     profileMemoryState.textContent = encounterState.locked
       ? '战斗中仅可关闭标点与小队消息'
-      : configDirty
-        ? '正在记忆修改…'
-        : encounterState.inEncounter ? '修改会自动记忆' : '进本时自动载入';
+        : configDirty
+          ? '正在保存修改…'
+          : hasPendingBridgeSync
+            ? '已保存，等待同步到 ACT'
+            : configBackendAvailable ? '修改会自动保存' : '保存在此浏览器';
     activeProfileStatus.textContent = activeProfile === undefined
       ? '尚无配置档案'
       : `当前：${activeProfile.name}`;
@@ -1223,39 +1563,105 @@
     if (encounterState.inEncounter)
       configTabDot.classList.add(hasPendingChanges ? 'pending' : 'applied');
 
-    if (!configBackendAvailable) {
-      configStateBadge.textContent = '等待桥接';
-      configStateBadge.className = 'config-state state-waiting';
-      configHint.textContent = '需要本地 StringDownloader 0.8.9 或更高版本的方案配置桥接。';
-      dirtyState.textContent = '下崽器配置桥接尚未连接';
-    } else if (!encounterState.inEncounter) {
-      configStateBadge.textContent = '未进本';
-      configStateBadge.className = 'config-state state-waiting';
-      configHint.textContent = `可预先编辑“${activeProfile?.name ?? '默认配置'}”；进入绝妖星后自动载入。`;
-      dirtyState.textContent = configDirty ? '正在保存到配置档案…' : '已保存到配置档案；进本后自动载入';
-    } else if (encounterState.locked) {
-      configStateBadge.textContent = '战斗中';
+    if (encounterState.locked) {
+      configStateBadge.textContent = configBackendAvailable ? '战斗中' : '桥接中断';
       configStateBadge.className = 'config-state state-locked';
-      configHint.textContent = '战斗中仅可关闭已开启的自动标点或小队消息；关闭后立即阻止后续发送。';
-      dirtyState.textContent = '方案已锁定；标点与小队消息可关闭';
-    } else if (hasPendingChanges) {
-      configStateBadge.textContent = '待应用';
+      configHint.textContent = configBackendAvailable
+        ? '战斗中仅可关闭已开启的自动标点或小队消息；关闭后立即阻止后续发送。'
+        : '桥接暂不可用；页面仍显示最后收到的实际开关状态，但目前无法下发关闭操作。';
+      dirtyState.textContent = hasPendingBridgeSync
+        ? '修改已保存在悬浮窗，脱战并恢复桥接后同步'
+        : '方案已锁定；桥接恢复后可关闭标点与小队消息';
+    } else if (!configBackendAvailable) {
+      configStateBadge.textContent = '本地模式';
       configStateBadge.className = 'config-state state-waiting';
-      configHint.textContent = `当前使用“${activeProfile?.name ?? '默认配置'}”；修改会自动记忆。`;
-      dirtyState.textContent = configDirty ? '正在记忆修改…' : '修改已记忆，点击“应用本次”生效';
-    } else {
-      configStateBadge.textContent = '本次已应用';
+      configHint.textContent = overlayConnected
+        ? `可直接修改“${activeProfile?.name ?? '默认配置'}”；桥接恢复后由这个悬浮窗同步到 ACT。`
+        : `可直接修改“${activeProfile?.name ?? '默认配置'}”；当前仅保存在此浏览器，不影响 ACT。`;
+      dirtyState.textContent = configDirty
+        ? '正在保存到此浏览器…'
+        : overlayConnected ? '已保存到悬浮窗，尚未下发 ACT' : '已保存到此浏览器，尚未下发 ACT';
+    } else if (hasPendingBridgeSync) {
+      configStateBadge.textContent = '待同步';
+      configStateBadge.className = 'config-state state-waiting';
+      configHint.textContent = `“${activeProfile?.name ?? '默认配置'}”已保存，正在同步到 ACT。`;
+      dirtyState.textContent = encounterState.inEncounter
+        ? '尚未应用到本次战斗'
+        : '尚未写入 ACT 配置档案';
+    } else if (!encounterState.inEncounter) {
+      configStateBadge.textContent = '已保存';
       configStateBadge.className = 'config-state state-applied';
-      configHint.textContent = `当前使用“${activeProfile?.name ?? '默认配置'}”；修改会自动记忆。`;
-      dirtyState.textContent = '当前配置已应用';
+      configHint.textContent = `“${activeProfile?.name ?? '默认配置'}”可随时修改，进入绝妖星时自动生效。`;
+      dirtyState.textContent = configDirty ? '正在保存到配置档案…' : '设置已保存；进本自动生效';
+    } else if (hasPendingChanges) {
+      configStateBadge.textContent = '正在保存';
+      configStateBadge.className = 'config-state state-waiting';
+      configHint.textContent = `当前使用“${activeProfile?.name ?? '默认配置'}”；修改会自动保存并生效。`;
+      dirtyState.textContent = '正在保存并应用修改…';
+    } else {
+      configStateBadge.textContent = '已生效';
+      configStateBadge.className = 'config-state state-applied';
+      configHint.textContent = `当前使用“${activeProfile?.name ?? '默认配置'}”；修改会自动保存并生效。`;
+      dirtyState.textContent = '当前设置已保存并生效';
     }
     scheduleOverlayResize();
   }
 
-  function setEncounterState(state, syncForm = false) {
-    if (state?.config === undefined)
+  function getBackendInstanceId(state) {
+    return typeof state?.instanceId === 'string' ? state.instanceId.trim() : '';
+  }
+
+  function resetBackendRevisionTracking() {
+    activeBackendInstanceId = '';
+    retiredBackendInstanceIds.clear();
+    latestBackendRevision = -1;
+    backendConfigProfiles = [];
+  }
+
+  function isStaleBackendState(state) {
+    const instanceId = getBackendInstanceId(state);
+    if (instanceId !== '' && retiredBackendInstanceIds.has(instanceId))
+      return true;
+    if (instanceId === '' && activeBackendInstanceId !== '')
+      return true;
+    if (instanceId !== '' && activeBackendInstanceId !== '' && instanceId !== activeBackendInstanceId)
+      return false;
+    const revision = Number(state?.revision);
+    if (!Number.isSafeInteger(revision) || revision < 0)
+      return false;
+    return revision < latestBackendRevision;
+  }
+
+  function acceptBackendRevision(state) {
+    if (isStaleBackendState(state))
+      return false;
+    const instanceId = getBackendInstanceId(state);
+    if (instanceId !== '' && instanceId !== activeBackendInstanceId) {
+      if (activeBackendInstanceId !== '')
+        retiredBackendInstanceIds.add(activeBackendInstanceId);
+      activeBackendInstanceId = instanceId;
+      latestBackendRevision = -1;
+      backendConfigProfiles = [];
+    }
+    const revision = Number(state?.revision);
+    if (!Number.isSafeInteger(revision) || revision < 0)
+      return true;
+    latestBackendRevision = revision;
+    return true;
+  }
+
+  function rememberBackendProfileMetadata(state) {
+    if (!Array.isArray(state?.profiles))
       return;
-    const previousZoneId = encounterState.zoneId;
+    backendConfigProfiles = state.profiles
+      .filter((profile) => typeof profile?.id === 'string' && typeof profile?.name === 'string')
+      .map((profile) => ({ id: profile.id, name: profile.name }));
+  }
+
+  function setEncounterState(state, syncForm = false) {
+    if (state?.config === undefined || !acceptBackendRevision(state))
+      return false;
+    rememberBackendProfileMetadata(state);
     encounterState = {
       ...encounterState,
       ...state,
@@ -1268,9 +1674,80 @@
       safeDefaults: { ...safeEncounterConfig, ...(state.safeDefaults ?? {}) },
     };
     renderProfileOptions();
-    if (syncForm || !configFormInitialized || previousZoneId !== encounterState.zoneId)
+    if (syncForm || !configFormInitialized)
       writeConfigToForm(encounterState.draftConfig);
     renderConfigState();
+    return true;
+  }
+
+  function mergeBackendLifecycleState(state) {
+    if (state?.config === undefined || !acceptBackendRevision(state))
+      return false;
+    rememberBackendProfileMetadata(state);
+    const profile = getLocalActiveProfile();
+    encounterState = {
+      ...encounterState,
+      ...state,
+      config: { ...safeEncounterConfig, ...state.config },
+      draftConfig: { ...profile.config },
+      activeProfileId: profile.id,
+      profiles: Array.isArray(state.profiles) ? state.profiles : encounterState.profiles,
+      safeDefaults: { ...safeEncounterConfig, ...(state.safeDefaults ?? {}) },
+      hasPendingChanges: state.inEncounter === true &&
+        JSON.stringify({ ...safeEncounterConfig, ...state.config }) !== JSON.stringify(profile.config),
+    };
+    updateEncounterFromLocal(false);
+    return true;
+  }
+
+  function adoptBackendState(state, syncForm = true) {
+    if (state?.config === undefined || !acceptBackendRevision(state))
+      return false;
+    rememberBackendStateLocally(state);
+    setEncounterState(state, false);
+    updateEncounterFromLocal(syncForm);
+    return true;
+  }
+
+  function captureDirtyFormLocally() {
+    clearTimeout(configSaveTimer);
+    configSaveTimer = undefined;
+    if (!configDirty)
+      return false;
+    saveLocalActiveConfig(readConfigFromForm());
+    configDirty = false;
+    renderConfigState();
+    return true;
+  }
+
+  function captureDirtyFormAfterBackendState(state) {
+    if (!configDirty)
+      return true;
+    try {
+      captureDirtyFormLocally();
+      return true;
+    } catch (error) {
+      mergeBackendLifecycleState(state);
+      configError.textContent = error?.message ?? String(error);
+      renderConfigState();
+      return false;
+    }
+  }
+
+  function enqueueConfigMutation(action) {
+    const run = async () => {
+      bridgeSyncInProgress = true;
+      renderConfigState();
+      try {
+        return await action();
+      } finally {
+        bridgeSyncInProgress = false;
+        renderConfigState();
+      }
+    };
+    const pending = configMutationQueue.then(run, run);
+    configMutationQueue = pending.catch(() => {});
+    return pending;
   }
 
   async function callStringConfig(action, payload = {}) {
@@ -1278,22 +1755,165 @@
     if (result?.ok !== true)
       throw new Error(result?.error ?? 'StringDownloader 未返回配置状态');
     configBackendAvailable = true;
-    setEncounterState(result.state);
     configError.textContent = result.state?.warning ?? '';
     return result;
   }
 
-  async function requestConfigState() {
-    try {
-      const result = await callStringConfig('get');
-      setEncounterState(result.state, true);
-    } catch (error) {
-      configBackendAvailable = false;
-      configError.textContent = error?.message ?? String(error);
-      if (!configFormInitialized)
-        writeConfigToForm(safeEncounterConfig);
-      renderConfigState();
+  function getLocalSyncSnapshot() {
+    const profile = getLocalActiveProfile();
+    return {
+      revision: localConfigStore.revision,
+      profileId: profile.id,
+      profileName: profile.name,
+      config: { ...profile.config },
+      serializedConfig: JSON.stringify(profile.config),
+    };
+  }
+
+  function localSyncSnapshotStillCurrent(snapshot) {
+    const profile = getLocalActiveProfile();
+    return !configDirty &&
+      localConfigStore.revision === snapshot.revision &&
+      profile.id === snapshot.profileId &&
+      profile.name === snapshot.profileName &&
+      JSON.stringify(profile.config) === snapshot.serializedConfig;
+  }
+
+  async function settleBridgeDraftRaw(result) {
+    if (isStaleBackendState(result.state) || result.state?.inEncounter !== true ||
+      result.state?.locked === true ||
+      result.state?.hasPendingChanges !== true) {
+      return result;
     }
+    return callStringConfig('apply', { config: result.state.draftConfig });
+  }
+
+  async function syncPendingLocalConfigToBridgeRaw() {
+    if (!localConfigStore.pendingBridgeSync || encounterState.locked)
+      return undefined;
+
+    let result;
+    for (let attempt = 0; attempt < 3 && localConfigStore.pendingBridgeSync; ++attempt) {
+      if (encounterState.locked)
+        break;
+      if (configDirty)
+        captureDirtyFormLocally();
+      const snapshot = getLocalSyncSnapshot();
+      result = await callStringConfig('saveProfile', {
+        name: snapshot.profileName,
+        config: snapshot.config,
+      });
+      try {
+        result = await settleBridgeDraftRaw(result);
+      } catch (error) {
+        mergeBackendLifecycleState(result.state);
+        throw error;
+      }
+      if (!captureDirtyFormAfterBackendState(result.state))
+        return;
+      if (localSyncSnapshotStillCurrent(snapshot)) {
+        if (adoptBackendState(result.state, true)) {
+          configError.textContent = '';
+          return result;
+        }
+      }
+      mergeBackendLifecycleState(result.state);
+    }
+
+    if (localConfigStore.pendingBridgeSync && !encounterState.locked) {
+      window.setTimeout(() => {
+        void syncPendingLocalConfigToBridge().catch((error) => {
+          configError.textContent = `设置已保存在悬浮窗；同步到 ACT 失败：${error?.message ?? String(error)}`;
+          renderConfigState();
+        });
+      });
+    }
+    return result;
+  }
+
+  async function resolveBridgeResultRaw(result, syncForm = true) {
+    try {
+      if (configDirty)
+        captureDirtyFormLocally();
+    } catch (error) {
+      mergeBackendLifecycleState(result.state);
+      configError.textContent = error?.message ?? String(error);
+      renderConfigState();
+      return result;
+    }
+    if (localConfigStore.pendingBridgeSync) {
+      mergeBackendLifecycleState(result.state);
+      if (!encounterState.locked)
+        return await syncPendingLocalConfigToBridgeRaw() ?? result;
+      return result;
+    }
+    adoptBackendState(result.state, syncForm);
+    return result;
+  }
+
+  function syncPendingLocalConfigToBridge() {
+    if (!localConfigStore.pendingBridgeSync)
+      return Promise.resolve(undefined);
+    return enqueueConfigMutation(syncPendingLocalConfigToBridgeRaw);
+  }
+
+  function requestConfigState() {
+    if (configRequestPromise !== undefined)
+      return configRequestPromise;
+    const request = requestConfigStateOnce();
+    configRequestPromise = request.finally(() => {
+      configRequestPromise = undefined;
+    });
+    return configRequestPromise;
+  }
+
+  async function requestConfigStateOnce() {
+    try {
+      if (configDirty)
+        captureDirtyFormLocally();
+    } catch (error) {
+      configError.textContent = error?.message ?? String(error);
+      renderConfigState();
+      return;
+    }
+
+    return enqueueConfigMutation(async () => {
+      let result;
+      try {
+        result = await callStringConfig('get');
+      } catch (error) {
+        configBackendAvailable = false;
+        resetBackendRevisionTracking();
+        configError.textContent = '';
+        updateEncounterFromLocal(false);
+        return;
+      }
+
+      if (!captureDirtyFormAfterBackendState(result.state))
+        return;
+
+      if (localConfigStore.pendingBridgeSync) {
+        mergeBackendLifecycleState(result.state);
+        if (result.state?.locked !== true) {
+          try {
+            await syncPendingLocalConfigToBridgeRaw();
+          } catch (error) {
+            configError.textContent = `设置已保存在悬浮窗；同步到 ACT 失败：${error?.message ?? String(error)}`;
+            renderConfigState();
+          }
+        }
+        return;
+      }
+
+      try {
+        result = await settleBridgeDraftRaw(result);
+        await resolveBridgeResultRaw(result, true);
+      } catch (error) {
+        setEncounterState(result.state, false);
+        configError.textContent = `ACT 中存在尚未应用的设置：${error?.message ?? String(error)}`;
+        renderConfigState();
+      }
+    });
   }
 
   async function handleZoneChanged(event) {
@@ -1303,31 +1923,78 @@
       return;
     try {
       await flushDraftSave();
-      const result = await callStringConfig('enterZone', {
-        zoneId,
-        zoneName: detail.zoneName ?? '',
-      });
-      setEncounterState(result.state, true);
     } catch (error) {
-      configBackendAvailable = false;
-      configError.textContent = error?.message ?? String(error);
-      setEncounterState({
-        zoneId,
-        zoneName: detail.zoneName ?? '',
-        inEncounter: zoneId === dancingMadUltimateZoneId,
-        confirmed: false,
-        locked: false,
-        revision: encounterState.revision + 1,
-        config: safeEncounterConfig,
-      }, true);
+      configError.textContent = `设置已保存在悬浮窗：${error?.message ?? String(error)}`;
+    }
+
+    let bridgeState;
+    try {
+      await enqueueConfigMutation(async () => {
+        let result = await callStringConfig('enterZone', {
+          zoneId,
+          zoneName: detail.zoneName ?? '',
+        });
+        bridgeState = result.state;
+        if (!captureDirtyFormAfterBackendState(result.state))
+          return;
+        if (localConfigStore.pendingBridgeSync) {
+          mergeBackendLifecycleState(result.state);
+          result = await syncPendingLocalConfigToBridgeRaw() ?? result;
+          bridgeState = result.state;
+          return;
+        }
+        result = await settleBridgeDraftRaw(result);
+        bridgeState = result.state;
+        await resolveBridgeResultRaw(result, true);
+      });
+    } catch (error) {
+      if (bridgeState !== undefined) {
+        mergeBackendLifecycleState(bridgeState);
+        configError.textContent = `设置已保存在悬浮窗；同步到 ACT 失败：${error?.message ?? String(error)}`;
+      } else {
+        configBackendAvailable = false;
+        resetBackendRevisionTracking();
+        configError.textContent = `设置仍保存在此悬浮窗：${error?.message ?? String(error)}`;
+        encounterState = {
+          ...encounterState,
+          zoneId,
+          zoneName: detail.zoneName ?? '',
+          inEncounter: zoneId === dancingMadUltimateZoneId,
+          confirmed: false,
+          locked: false,
+          revision: encounterState.revision + 1,
+        };
+        updateEncounterFromLocal(false);
+      }
+      renderConfigState();
     }
     if (zoneId === dancingMadUltimateZoneId)
       setView('config');
   }
 
   function handleStringConfigChanged(event) {
+    if (isStaleBackendState(event?.state))
+      return;
     const previousZoneId = encounterState.zoneId;
-    setEncounterState(event?.state);
+    configBackendAvailable = true;
+    try {
+      if (configDirty)
+        captureDirtyFormLocally();
+    } catch (error) {
+      configError.textContent = error?.message ?? String(error);
+    }
+    if (configDirty || localConfigStore.pendingBridgeSync) {
+      mergeBackendLifecycleState(event?.state);
+      if (!configDirty && localConfigStore.pendingBridgeSync &&
+        event?.state?.locked !== true && !bridgeSyncInProgress) {
+        void syncPendingLocalConfigToBridge().catch((error) => {
+          configError.textContent = `设置已保存在悬浮窗；同步到 ACT 失败：${error?.message ?? String(error)}`;
+          updateEncounterFromLocal(false);
+        });
+      }
+      return;
+    }
+    adoptBackendState(event?.state, true);
     if (encounterState.zoneId === dancingMadUltimateZoneId && previousZoneId !== encounterState.zoneId)
       setView('config');
   }
@@ -1336,12 +2003,25 @@
     const detail = event?.detail ?? event ?? {};
     const inCombat = Boolean(detail.inGameCombat ?? detail.inACTCombat ?? false);
     try {
-      if (inCombat)
-        await flushDraftSave();
-      const result = await callStringConfig('setCombat', { inCombat });
-      setEncounterState(result.state);
+      await enqueueConfigMutation(async () => {
+        let result = await callStringConfig('setCombat', { inCombat });
+        if (!captureDirtyFormAfterBackendState(result.state))
+          return;
+        if (localConfigStore.pendingBridgeSync) {
+          mergeBackendLifecycleState(result.state);
+          if (!inCombat)
+            result = await syncPendingLocalConfigToBridgeRaw() ?? result;
+          return;
+        }
+        if (!inCombat)
+          result = await settleBridgeDraftRaw(result);
+        await resolveBridgeResultRaw(result, !configDirty);
+      });
     } catch (error) {
-      configError.textContent = error?.message ?? String(error);
+      configError.textContent = localConfigStore.pendingBridgeSync
+        ? `设置已保存在悬浮窗；同步到 ACT 失败：${error?.message ?? String(error)}`
+        : error?.message ?? String(error);
+      renderConfigState();
     }
   }
 
@@ -1356,8 +2036,22 @@
     control.disabled = true;
     configError.textContent = '';
     try {
+      const hadPendingLocalChanges = localConfigStore.pendingBridgeSync || configDirty;
       const result = await callStringConfig('disableCombatOption', { key });
-      setEncounterState(result.state, true);
+      const preserveLocalChanges = hadPendingLocalChanges ||
+        localConfigStore.pendingBridgeSync || configDirty;
+      if (!preserveLocalChanges) {
+        adoptBackendState(result.state, true);
+        renderConfigState();
+        return;
+      }
+      const profile = getLocalActiveProfile();
+      profile.config = normalizeLocalConfig({ ...profile.config, [key]: false }, profile.config);
+      localConfigStore.pendingBridgeSync = true;
+      touchLocalConfig();
+      persistLocalConfigStore();
+      mergeBackendLifecycleState(result.state);
+      renderConfigState();
     } catch (error) {
       control.checked = isCombatDisableEnabled(key);
       configError.textContent = error?.message ?? String(error);
@@ -1376,23 +2070,41 @@
   async function persistDraftConfig() {
     clearTimeout(configSaveTimer);
     configSaveTimer = undefined;
-    if (!configDirty || !configBackendAvailable || encounterState.locked)
+    if (!configDirty)
       return;
 
     const config = readConfigFromForm();
     const snapshot = JSON.stringify(config);
     const save = async () => {
+      let unchanged;
       try {
-        const result = await callStringConfig('update', { config });
-        const unchanged = JSON.stringify(readConfigFromForm()) === snapshot;
-        if (unchanged)
-          configDirty = false;
-        setEncounterState(result.state, unchanged);
-        if (!unchanged)
-          scheduleDraftSave();
+        saveLocalActiveConfig(config);
+        unchanged = JSON.stringify(readConfigFromForm()) === snapshot;
+        configDirty = !unchanged;
       } catch (error) {
         configDirty = true;
         configError.textContent = error?.message ?? String(error);
+        renderConfigState();
+        return;
+      }
+
+      if (!configBackendAvailable || encounterState.locked) {
+        configError.textContent = '';
+        renderConfigState();
+        if (!unchanged)
+          scheduleDraftSave();
+        return;
+      }
+
+      try {
+        await syncPendingLocalConfigToBridge();
+        unchanged = JSON.stringify(readConfigFromForm()) === snapshot;
+        configDirty = !unchanged;
+        if (!unchanged)
+          scheduleDraftSave();
+      } catch (error) {
+        configDirty = !unchanged;
+        configError.textContent = `设置已保存在悬浮窗；同步到 ACT 失败：${error?.message ?? String(error)}`;
         renderConfigState();
       }
     };
@@ -1413,11 +2125,26 @@
     const profileId = configProfileSelect.value;
     try {
       await flushDraftSave();
-      const result = await callStringConfig('selectProfile', { profileId });
-      setEncounterState(result.state, true);
+      if (!configBackendAvailable) {
+        selectLocalConfigProfile(profileId);
+        configError.textContent = '';
+        return;
+      }
+      await enqueueConfigMutation(async () => {
+        if (!backendConfigProfiles.some((profile) => profile.id === profileId)) {
+          selectLocalConfigProfile(profileId);
+          await syncPendingLocalConfigToBridgeRaw();
+          return;
+        }
+        let result = await callStringConfig('selectProfile', { profileId });
+        result = await settleBridgeDraftRaw(result);
+        await resolveBridgeResultRaw(result, true);
+      });
       configError.textContent = '';
     } catch (error) {
-      configError.textContent = error?.message ?? String(error);
+      configError.textContent = localConfigStore.pendingBridgeSync
+        ? `设置已保存在悬浮窗；同步到 ACT 失败：${error?.message ?? String(error)}`
+        : error?.message ?? String(error);
       renderConfigState();
     }
   }
@@ -1428,15 +2155,13 @@
       return;
     try {
       await flushDraftSave();
-      const result = await callStringConfig('saveProfile', {
-        name,
-        config: readConfigFromForm(),
-      });
+      saveLocalConfigProfile(name, readConfigFromForm());
       profileNameInput.value = '';
-      setEncounterState(result.state, true);
+      if (configBackendAvailable)
+        await syncPendingLocalConfigToBridge();
       configError.textContent = '';
     } catch (error) {
-      configError.textContent = error?.message ?? String(error);
+      configError.textContent = `设置已保存在悬浮窗；同步到 ACT 失败：${error?.message ?? String(error)}`;
       renderConfigState();
     }
   }
@@ -1444,27 +2169,38 @@
   async function restoreDefaults() {
     try {
       await flushDraftSave();
-      const result = await callStringConfig('reset');
-      setEncounterState(result.state, true);
+      resetLocalConfigProfile();
+      if (!configBackendAvailable) {
+        configError.textContent = '';
+        return;
+      }
+      await syncPendingLocalConfigToBridge();
       configError.textContent = '';
     } catch (error) {
-      configError.textContent = error?.message ?? String(error);
+      configError.textContent = `设置已保存在悬浮窗；同步到 ACT 失败：${error?.message ?? String(error)}`;
       renderConfigState();
     }
   }
 
   async function applyEncounterConfig() {
-    if (!encounterState.inEncounter || encounterState.locked ||
-      (!configDirty && !encounterState.hasPendingChanges))
+    if (encounterState.locked)
       return;
     applyConfigButton.disabled = true;
     configError.textContent = '';
     try {
       await flushDraftSave();
-      const result = await callStringConfig('apply', { config: readConfigFromForm() });
-      setEncounterState(result.state, true);
+      const config = saveLocalActiveConfig(readConfigFromForm());
+      if (!configBackendAvailable) {
+        localConfigStore.pendingBridgeSync = true;
+        persistLocalConfigStore();
+        configDirty = false;
+        renderConfigState();
+        return;
+      }
+      await syncPendingLocalConfigToBridge();
+      configDirty = false;
     } catch (error) {
-      configError.textContent = error?.message ?? String(error);
+      configError.textContent = `设置已保存在悬浮窗；同步到 ACT 失败：${error?.message ?? String(error)}`;
       renderConfigState();
     }
   }
@@ -1488,6 +2224,12 @@
     for (const tab of phaseTabs)
       tab.addEventListener('click', () => setActivePhase(tab.dataset.phase));
     for (const control of configControls) {
+      if (control instanceof HTMLInputElement && control.type === 'text') {
+        control.addEventListener('input', () => {
+          if (!encounterState.locked)
+            scheduleDraftSave();
+        });
+      }
       control.addEventListener('change', () => {
         if (encounterState.locked) {
           void disableCombatOption(control);
@@ -1497,6 +2239,14 @@
         scheduleDraftSave();
       });
     }
+    window.addEventListener('beforeunload', () => {
+      try {
+        if (configDirty)
+          captureDirtyFormLocally();
+      } catch (error) {
+        console.error(error);
+      }
+    });
     for (const select of document.querySelectorAll('select'))
       bindSelectInteraction(select);
     document.addEventListener('pointerdown', (event) => {
@@ -1529,6 +2279,7 @@
       enterZone: (zoneId = dancingMadUltimateZoneId, zoneName = '妖星乱舞绝境战') =>
         handleZoneChanged({ zoneID: zoneId, zoneName }),
       setCombat: (inCombat) => handleCombatChanged({ detail: { inGameCombat: inCombat } }),
+      requestConfigState,
       setPhase: setActivePhase,
       getEncounterState: () => ({
         ...encounterState,
@@ -1536,9 +2287,10 @@
         draftConfig: { ...encounterState.draftConfig },
         profiles: encounterState.profiles.map((profile) => ({ ...profile })),
       }),
+      getLocalConfigState: () => JSON.parse(JSON.stringify(localConfigStore)),
     };
 
-    writeConfigToForm(safeEncounterConfig);
+    writeConfigToForm(initialLocalProfile.config);
     renderProfileOptions();
     setActivePhase(activePhase);
     renderConfigState();
@@ -1570,6 +2322,10 @@
       window.setInterval(() => {
         if (party.length === 0)
           requestPartySnapshot();
+        if ((!configBackendAvailable || localConfigStore.pendingBridgeSync ||
+          encounterState.hasPendingChanges) && !bridgeSyncInProgress) {
+          requestConfigState();
+        }
       }, 3000);
     });
     window.setTimeout(() => {
