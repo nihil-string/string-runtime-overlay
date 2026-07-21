@@ -126,6 +126,15 @@
   let overlayConnected = false;
   let activeView = 'roles';
   let activePhase = 'p1';
+  let compactMode = true;
+  let pointerInside = false;
+  let compactTimer;
+  let selectInteraction;
+  let selectInteractionTimer;
+  let resizeScheduleToken = 0;
+  let resizeRequestSequence = 0;
+  let resizeQueue = Promise.resolve();
+  let lastResizeKey = '';
   let configDirty = false;
   let configSaveTimer;
   let configSavePromise = Promise.resolve();
@@ -251,6 +260,21 @@
       if (request.call !== 'stringConfig')
         return { ok: true };
 
+      if (request.action === 'resizeOverlay') {
+        const width = Math.max(1, Math.round(Number(request.width) || 0));
+        const height = Math.max(1, Math.round(Number(request.height) || 0));
+        return {
+          ok: true,
+          mode: request.mode,
+          appliedWidth: width,
+          appliedHeight: height,
+        };
+      }
+
+      const draftActions = new Set(['update', 'selectProfile', 'saveProfile', 'reset']);
+      if (state.locked && draftActions.has(request.action))
+        return { ok: false, error: '战斗中设置已锁定，请脱战后修改' };
+
       if (request.action === 'enterZone') {
         const zoneId = Number(request.zoneId ?? 0);
         if (zoneId !== state.zoneId) {
@@ -308,6 +332,8 @@
         updateDemoState({ revision: state.revision + 1 });
         dispatch({ type: 'StringConfigChanged', state });
       } else if (request.action === 'apply') {
+        if (!state.inEncounter)
+          return { ok: false, error: '当前不在绝妖星，进入副本后才能应用本次配置' };
         if (state.locked)
           return { ok: false, error: '战斗中设置已锁定，请脱战后修改' };
         const config = { ...safeEncounterConfig, ...request.config };
@@ -610,6 +636,7 @@
 
     select.value = selectedName ?? '';
     select.addEventListener('change', () => assignMemberToRole(select.value, role));
+    bindSelectInteraction(select);
     return select;
   }
 
@@ -721,6 +748,7 @@
   }
 
   function openMemberSelect(select) {
+    beginSelectInteraction(select);
     try {
       select.focus({ preventScroll: true });
     } catch {
@@ -789,6 +817,7 @@
     pointerDragState = undefined;
     for (const slot of roleSlots.querySelectorAll('.role-slot'))
       slot.classList.remove('dragging', 'drag-over');
+    scheduleCompactMode();
   }
 
   function defaultSort() {
@@ -880,14 +909,125 @@
     }
   }
 
-  function setView(view) {
-    activeView = view === 'config' ? 'config' : 'roles';
-    appShell.dataset.view = activeView;
-    rolesPanel.hidden = activeView !== 'roles';
-    configPanel.hidden = activeView !== 'config';
+  function currentLayoutMode() {
+    return compactMode ? 'compact' : activeView;
+  }
+
+  function measureOverlayLayout() {
+    const bounds = appShell.getBoundingClientRect();
+    return {
+      width: Math.ceil(Math.max(appShell.scrollWidth, bounds.width) + 2),
+      height: Math.ceil(Math.max(appShell.scrollHeight, bounds.height) + 2),
+    };
+  }
+
+  function updateResizeFallback(mode, requested, result, requestSequence) {
+    if (requestSequence !== resizeRequestSequence)
+      return;
+    const appliedWidth = Number(result?.appliedWidth);
+    const appliedHeight = Number(result?.appliedHeight);
+    const acknowledged = result?.ok === true &&
+      Number.isFinite(appliedWidth) && Number.isFinite(appliedHeight);
+    const clipped = !acknowledged ||
+      appliedWidth + 12 < requested.width || appliedHeight + 12 < requested.height;
+    document.documentElement.classList.toggle('resize-fallback', mode === 'config' && clipped);
+  }
+
+  async function requestOverlayLayout(mode, requested, requestSequence) {
+    let result;
+    try {
+      result = await window.callOverlayHandler({
+        call: 'stringConfig',
+        action: 'resizeOverlay',
+        mode,
+        width: requested.width,
+        height: requested.height,
+      });
+    } catch (error) {
+      console.debug('String Runtime overlay resize failed', error);
+    }
+    updateResizeFallback(mode, requested, result, requestSequence);
+  }
+
+  function scheduleOverlayResize(resetFallback = false) {
+    if (resetFallback)
+      document.documentElement.classList.remove('resize-fallback');
+    const scheduleToken = ++resizeScheduleToken;
+    window.requestAnimationFrame(() => window.requestAnimationFrame(() => {
+      if (scheduleToken !== resizeScheduleToken || typeof window.callOverlayHandler !== 'function')
+        return;
+      const mode = currentLayoutMode();
+      const requested = measureOverlayLayout();
+      const resizeKey = `${mode}:${requested.width}x${requested.height}`;
+      if (!resetFallback && resizeKey === lastResizeKey)
+        return;
+      lastResizeKey = resizeKey;
+      const requestSequence = ++resizeRequestSequence;
+      const resize = () => requestOverlayLayout(mode, requested, requestSequence);
+      resizeQueue = resizeQueue.then(resize, resize);
+    }));
+  }
+
+  function renderActiveView(resetFallback = false) {
+    const renderedView = compactMode ? 'roles' : activeView;
+    appShell.dataset.compact = compactMode ? 'true' : 'false';
+    appShell.dataset.view = renderedView;
+    rolesPanel.hidden = renderedView !== 'roles';
+    configPanel.hidden = renderedView !== 'config';
     rolesTab.classList.toggle('active', activeView === 'roles');
     configTab.classList.toggle('active', activeView === 'config');
     viewTitle.textContent = activeView === 'config' ? '本次设置' : '职能分配';
+    scheduleOverlayResize(resetFallback);
+  }
+
+  function setCompactMode(compact) {
+    const nextCompactMode = Boolean(compact);
+    if (compactMode === nextCompactMode)
+      return;
+    compactMode = nextCompactMode;
+    if (compactMode && appShell.contains(document.activeElement))
+      document.activeElement.blur();
+    renderActiveView(true);
+  }
+
+  function scheduleCompactMode() {
+    clearTimeout(compactTimer);
+    if (pointerInside || pointerDragState !== undefined || selectInteraction !== undefined)
+      return;
+    compactTimer = window.setTimeout(() => {
+      if (!pointerInside && pointerDragState === undefined && selectInteraction === undefined)
+        setCompactMode(true);
+    }, 180);
+  }
+
+  function endSelectInteraction(select) {
+    if (selectInteraction !== select)
+      return;
+    selectInteraction = undefined;
+    clearTimeout(selectInteractionTimer);
+    scheduleCompactMode();
+  }
+
+  function beginSelectInteraction(select) {
+    selectInteraction = select;
+    clearTimeout(compactTimer);
+    clearTimeout(selectInteractionTimer);
+    selectInteractionTimer = window.setTimeout(() => endSelectInteraction(select), 30000);
+  }
+
+  function bindSelectInteraction(select) {
+    select.addEventListener('pointerdown', () => beginSelectInteraction(select));
+    select.addEventListener('change', () => window.setTimeout(() => endSelectInteraction(select), 0));
+    select.addEventListener('blur', () => endSelectInteraction(select));
+    select.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape')
+        window.setTimeout(() => endSelectInteraction(select), 0);
+    });
+  }
+
+  function setView(view) {
+    activeView = view === 'config' ? 'config' : 'roles';
+    renderActiveView(true);
   }
 
   function setActivePhase(phase) {
@@ -899,6 +1039,7 @@
     }
     for (const panel of phasePanels)
       panel.hidden = panel.dataset.phasePanel !== activePhase;
+    scheduleOverlayResize(true);
   }
 
   function writeConfigToForm(config) {
@@ -971,7 +1112,8 @@
   }
 
   function renderConfigState() {
-    const editable = configBackendAvailable && encounterState.inEncounter && !encounterState.locked;
+    const editable = configBackendAvailable && !encounterState.locked;
+    const canApply = editable && encounterState.inEncounter;
     const activeProfile = getActiveProfile();
     const hasPendingChanges = configDirty || encounterState.hasPendingChanges;
     configPanel.classList.toggle('locked', encounterState.locked);
@@ -983,8 +1125,12 @@
     profileNameInput.disabled = !editable;
     saveProfileButton.disabled = !editable || profileNameInput.value.trim() === '';
     restoreDefaultsButton.disabled = !editable;
-    applyConfigButton.disabled = !editable || !hasPendingChanges;
-    profileMemoryState.textContent = configDirty ? '正在记忆修改…' : '修改会自动记忆';
+    applyConfigButton.disabled = !canApply || !hasPendingChanges;
+    applyConfigButton.textContent = encounterState.inEncounter ? '应用本次' : '进本后可应用';
+    applyConfigButton.title = encounterState.inEncounter ? '' : '进入绝妖星后可应用到当前副本';
+    profileMemoryState.textContent = configDirty
+      ? '正在记忆修改…'
+      : encounterState.inEncounter ? '修改会自动记忆' : '进本时自动载入';
     activeProfileStatus.textContent = activeProfile === undefined
       ? '尚无配置档案'
       : `当前：${activeProfile.name}`;
@@ -1001,8 +1147,8 @@
     } else if (!encounterState.inEncounter) {
       configStateBadge.textContent = '未进本';
       configStateBadge.className = 'config-state state-waiting';
-      configHint.textContent = '进入绝妖星后自动载入当前配置档案。';
-      dirtyState.textContent = '等待进入绝妖星';
+      configHint.textContent = `可预先编辑“${activeProfile?.name ?? '默认配置'}”；进入绝妖星后自动载入。`;
+      dirtyState.textContent = configDirty ? '正在保存到配置档案…' : '已保存到配置档案；进本后自动载入';
     } else if (encounterState.locked) {
       configStateBadge.textContent = '战斗中锁定';
       configStateBadge.className = 'config-state state-locked';
@@ -1019,6 +1165,7 @@
       configHint.textContent = `当前使用“${activeProfile?.name ?? '默认配置'}”；修改会自动记忆。`;
       dirtyState.textContent = '当前配置已应用';
     }
+    scheduleOverlayResize();
   }
 
   function setEncounterState(state, syncForm = false) {
@@ -1125,7 +1272,7 @@
   async function persistDraftConfig() {
     clearTimeout(configSaveTimer);
     configSaveTimer = undefined;
-    if (!configDirty || !configBackendAvailable || encounterState.locked || !encounterState.inEncounter)
+    if (!configDirty || !configBackendAvailable || encounterState.locked)
       return;
 
     const config = readConfigFromForm();
@@ -1203,7 +1350,8 @@
   }
 
   async function applyEncounterConfig() {
-    if (!configDirty && !encounterState.hasPendingChanges)
+    if (!encounterState.inEncounter || encounterState.locked ||
+      (!configDirty && !encounterState.hasPendingChanges))
       return;
     applyConfigButton.disabled = true;
     configError.textContent = '';
@@ -1241,6 +1389,17 @@
         scheduleDraftSave();
       });
     }
+    for (const select of document.querySelectorAll('select'))
+      bindSelectInteraction(select);
+    appShell.addEventListener('pointerenter', () => {
+      pointerInside = true;
+      clearTimeout(compactTimer);
+      setCompactMode(false);
+    });
+    appShell.addEventListener('pointerleave', () => {
+      pointerInside = false;
+      scheduleCompactMode();
+    });
 
     window.stringRuntimeDebug = {
       setParty,
@@ -1266,6 +1425,9 @@
     render();
     installDemoOverlayApi();
     installOverlayApi();
+    pointerInside = appShell.matches(':hover');
+    compactMode = !pointerInside;
+    renderActiveView(true);
     connectionState.textContent = '连接中';
     connectionState.className = 'state state-pending';
     window.addOverlayListener('PartyChanged', (event) => setParty(event.party));

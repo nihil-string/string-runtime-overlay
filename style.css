@@ -73,7 +73,8 @@ input {
 }
 
 .shell[data-view="config"] {
-  width: min(37em, 100vw);
+  width: 64em;
+  max-width: none;
 }
 
 .titlebar,
@@ -433,12 +434,9 @@ h1 {
 }
 
 .config-panel {
-  max-height: calc(100vh - 7.3em);
   margin-top: 0.25em;
-  overflow-x: hidden;
-  overflow-y: auto;
+  overflow: visible;
   border-color: rgba(111, 226, 231, 0.34);
-  scrollbar-color: var(--cyan-dark) transparent;
 }
 
 .config-hero {
@@ -518,7 +516,7 @@ h1 {
 
 .general-grid {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: 1px;
   background: var(--line);
 }
@@ -715,7 +713,7 @@ h1 {
 
 .phase-fields {
   display: grid;
-  grid-template-columns: 1fr;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 1px;
   background: var(--line);
 }
@@ -760,6 +758,10 @@ h1 {
   grid-template-columns: 12.2em minmax(0, 1fr);
 }
 
+.field-text {
+  grid-column: 1 / -1;
+}
+
 .field-row select,
 .field-row input[type="text"] {
   width: 100%;
@@ -779,8 +781,6 @@ h1 {
 }
 
 .config-actions {
-  position: sticky;
-  bottom: 0;
   display: grid;
   grid-template-columns: minmax(0, 1fr) 8.5em;
   align-items: center;
@@ -827,72 +827,71 @@ h1 {
   opacity: 0.55;
 }
 
-.shell[data-view="roles"]:not(:hover):not(:focus-within) .titlebar,
-.shell[data-view="roles"]:not(:hover):not(:focus-within) .view-tabs,
-.shell[data-view="roles"]:not(:hover):not(:focus-within) .toolbar,
-.shell[data-view="roles"]:not(:hover):not(:focus-within) .footer {
+.shell[data-compact="true"] .titlebar,
+.shell[data-compact="true"] .view-tabs,
+.shell[data-compact="true"] .toolbar,
+.shell[data-compact="true"] .footer {
   display: none;
 }
 
-.shell[data-view="roles"]:not(:hover):not(:focus-within) .member-job {
+.shell[data-compact="true"] .member-job {
   display: none;
 }
 
-.shell[data-view="roles"]:not(:hover):not(:focus-within) .role-board {
+.shell[data-compact="true"] .role-board {
   width: auto;
   margin-top: 0;
 }
 
-.shell[data-view="roles"]:not(:hover):not(:focus-within) .role-slot {
+.shell[data-compact="true"] .role-slot {
   grid-template-columns: 2.45em 1.35em minmax(10em, max-content);
   padding-right: 0.35em;
 }
 
-.shell[data-view="roles"]:not(:hover):not(:focus-within) .member-name {
+.shell[data-compact="true"] .member-name {
   max-width: 14.5em;
 }
 
-@media (max-width: 480px) {
-  .shell[data-view="config"] {
-    width: 100vw;
-  }
+html.resize-fallback .shell[data-view="config"] {
+  width: 100vw;
+  max-width: 100vw;
+}
 
-  .general-grid {
-    grid-template-columns: 1fr;
-  }
+html.resize-fallback .config-panel {
+  max-height: calc(100vh - 7.3em);
+  overflow-x: hidden;
+  overflow-y: auto;
+  scrollbar-color: var(--cyan-dark) transparent;
+}
 
-  .profile-controls {
-    grid-template-columns: 1fr 1fr;
-  }
+html.resize-fallback .config-actions {
+  position: sticky;
+  bottom: 0;
+}
 
-  .profile-controls .button {
-    grid-column: 1 / -1;
-  }
+html.resize-fallback .general-grid,
+html.resize-fallback .phase-fields {
+  grid-template-columns: 1fr;
+}
 
-  .config-panel {
-    max-height: calc(100vh - 7.3em);
-  }
+html.resize-fallback .field-text {
+  grid-column: auto;
+}
+
+html.resize-fallback .profile-controls {
+  grid-template-columns: 1fr 1fr;
+}
+
+html.resize-fallback .profile-controls .button {
+  grid-column: 1 / -1;
 }
 
 @media (max-width: 300px) {
-  .shell {
+  .shell[data-view="roles"] {
     width: 100vw;
   }
 
   .role-slot {
     grid-template-columns: 2.25em 1.25em minmax(0, 1fr) 2.8em;
-  }
-
-  .general-grid,
-  .profile-controls {
-    grid-template-columns: 1fr;
-  }
-
-  .profile-controls .button {
-    grid-column: 1;
-  }
-
-  .config-actions {
-    grid-template-columns: 1fr;
   }
 }
