@@ -3,38 +3,200 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>String 职能分配</title>
+  <title>String Raid Ops</title>
   <link rel="icon" href="data:,">
-  <link rel="stylesheet" href="./style.css?v=20260622-1">
+  <link rel="stylesheet" href="./style.css?v=20260716-2">
 </head>
 <body>
-  <main class="shell">
+  <main id="appShell" class="shell" data-view="roles">
     <header class="titlebar">
-      <div>
-        <h1>String 职能分配</h1>
+      <div class="brand-lockup">
+        <span class="brand-kicker">STRING // RAID OPS</span>
+        <h1 id="viewTitle">职能分配</h1>
         <p id="partySummary">等待小队数据</p>
       </div>
       <div id="connectionState" class="state state-idle">未连接</div>
     </header>
 
-    <section class="toolbar" aria-label="职能分配操作">
-      <button id="defaultSortButton" class="button" type="button" title="按职业默认顺序重新分配">重排</button>
-      <button id="broadcastButton" class="button button-primary" type="button" title="广播当前 MT/ST/H1/H2/D1-D4 分配">广播</button>
+    <nav class="view-tabs" aria-label="功能切换">
+      <button id="rolesTab" class="view-tab active" type="button" data-view="roles">职能</button>
+      <button id="configTab" class="view-tab" type="button" data-view="config">
+        本次设置
+        <span id="configTabDot" class="tab-dot" aria-hidden="true"></span>
+      </button>
+    </nav>
+
+    <section id="rolesPanel" class="view-panel">
+      <section class="toolbar" aria-label="职能分配操作">
+        <button id="defaultSortButton" class="button" type="button" title="按职业默认顺序重新分配">重排</button>
+      </section>
+
+      <section class="role-board" aria-label="当前职能分配">
+        <div id="roleSlots" class="role-slots"></div>
+      </section>
+
+      <footer class="footer">
+        <span id="statusText">打开 ACT/OverlayPlugin 后会自动读取当前小队。</span>
+        <span id="lastBroadcastText">尚未广播</span>
+      </footer>
     </section>
 
-    <section class="role-board" aria-label="当前职能分配">
-      <div id="roleSlots" class="role-slots"></div>
-    </section>
+    <section id="configPanel" class="view-panel config-panel" hidden>
+      <div class="config-hero">
+        <div>
+          <span class="eyebrow">绝妖星 · ZONE 1363</span>
+          <h2>本次进本设置</h2>
+          <p id="configHint">进入绝妖星后自动使用当前配置档案。</p>
+        </div>
+        <span id="configStateBadge" class="config-state state-waiting">未进本</span>
+      </div>
 
-    <footer class="footer">
-      <span id="statusText">打开 ACT/OverlayPlugin 后会自动读取当前小队。</span>
-      <span id="lastBroadcastText">尚未广播</span>
-    </footer>
+      <section class="general-card" aria-labelledby="generalTitle">
+        <h3 id="generalTitle" class="sr-only">全局设置</h3>
+        <div class="general-grid">
+          <label class="toggle-row">
+            <span><strong>提示输出</strong><small>使用触发器 TTS</small></span>
+            <input type="checkbox" data-config-key="MyDMU_ForceTTS">
+            <i></i>
+          </label>
+          <label class="toggle-row">
+            <span><strong>自动标点</strong><small>标点功能总开关</small></span>
+            <input type="checkbox" data-config-key="MyDMU_AutoMarkV5">
+            <i></i>
+          </label>
+          <label class="toggle-row">
+            <span><strong>仅本地标点</strong><small>不影响其他队员</small></span>
+            <input type="checkbox" data-config-key="MyDMU_LocalMarkV3">
+            <i></i>
+          </label>
+          <label class="toggle-row">
+            <span><strong>String 原生绘图</strong><small>总开关（默认关闭）</small></span>
+            <input type="checkbox" data-config-key="MyDMU_StringNativeVfx">
+            <i></i>
+          </label>
+          <label class="toggle-row">
+            <span><strong>个人路线指引</strong><small>只绘制本人的路线箭头</small></span>
+            <input type="checkbox" data-config-key="MyDMU_StringNativeVfxPersonalGuide">
+            <i></i>
+          </label>
+        </div>
+      </section>
+
+      <section class="profile-card" aria-labelledby="profileTitle">
+        <div class="profile-heading">
+          <span id="profileTitle">配置档案</span>
+          <small id="profileMemoryState">修改会自动记忆</small>
+        </div>
+        <div class="profile-controls">
+          <label class="sr-only" for="configProfileSelect">选择配置档案</label>
+          <select id="configProfileSelect" aria-label="选择配置档案"></select>
+          <label class="sr-only" for="profileNameInput">配置名称</label>
+          <input id="profileNameInput" type="text" maxlength="32" placeholder="输入配置名称" autocomplete="off">
+          <button id="saveProfileButton" class="button button-primary" type="button">保存当前</button>
+        </div>
+        <div class="profile-footer">
+          <span id="activeProfileStatus">当前：默认配置</span>
+          <button id="restoreDefaultsButton" class="link-button" type="button">恢复默认</button>
+        </div>
+      </section>
+
+      <nav class="phase-tabs" role="tablist" aria-label="P1 到 P5 设置">
+        <button id="phaseTabP1" class="phase-tab active" type="button" role="tab" aria-selected="true" aria-controls="phasePanelP1" data-phase="p1">P1</button>
+        <button id="phaseTabP2" class="phase-tab" type="button" role="tab" aria-selected="false" aria-controls="phasePanelP2" data-phase="p2">P2</button>
+        <button id="phaseTabP3" class="phase-tab" type="button" role="tab" aria-selected="false" aria-controls="phasePanelP3" data-phase="p3">P3</button>
+        <button id="phaseTabP4" class="phase-tab" type="button" role="tab" aria-selected="false" aria-controls="phasePanelP4" data-phase="p4">P4</button>
+        <button id="phaseTabP5" class="phase-tab" type="button" role="tab" aria-selected="false" aria-controls="phasePanelP5" data-phase="p5">P5</button>
+      </nav>
+
+      <div class="phase-content">
+        <section id="phasePanelP1" class="phase-panel" role="tabpanel" aria-labelledby="phaseTabP1" data-phase-panel="p1">
+          <div class="phase-fields">
+            <label class="field-row"><span>P1 原生绘图</span><input type="checkbox" data-config-key="MyDMU_StringNativeVfxP1"></label>
+            <label class="field-row field-text"><span class="field-label">激光 / 四塔职能顺序<small>从左到右，必须完整填写 8 个不同职能</small></span><input type="text" data-config-key="MyDMU_P1BeamOrder" maxlength="128"></label>
+            <label class="field-row field-select"><span>二、三连线方案</span><select data-config-key="MyDMU_P1Line23Strategy"><option value="mt_st">MT 组上 / ST 组下（默认）</option><option value="tank_ranged">坦克远敏上 / 治疗近战下</option></select></label>
+            <label class="field-row field-select"><span>传送站位方案</span><select data-config-key="MyDMU_P1TeleportStrategy"><option value="standard">标准站位（默认）</option><option value="sushi_melee">寿司近战：混乱外 / 睡眠内</option></select></label>
+            <label class="field-row"><span>行动播报</span><input type="checkbox" data-config-key="MyDMU_P1Callout"></label>
+            <label class="field-row"><span>5078 锁链标点</span><input type="checkbox" data-config-key="MyDMU_P1PoisonMarkV3"></label>
+          </div>
+        </section>
+
+        <section id="phasePanelP2" class="phase-panel" role="tabpanel" aria-labelledby="phaseTabP2" data-phase-panel="p2" hidden>
+          <div class="phase-fields">
+            <label class="field-row"><span>P2 原生绘图</span><input type="checkbox" data-config-key="MyDMU_StringNativeVfxP2"></label>
+            <label class="field-row"><span>八轮塔标点</span><input type="checkbox" data-config-key="MyDMU_P2TowerMarkV3"></label>
+            <label class="field-row field-select"><span class="field-label">八轮塔 MuAi 方案<small>快捷设置下方两个精确策略轴</small></span><select id="p2EightTowerPreset"><option value="role_fixed">职能固定（默认）</option><option value="fan_steel">扇左钢右</option><option value="uptime">职能固定 Uptime</option><option value="custom" disabled>自定义组合（由下方两轴识别）</option></select></label>
+            <label class="field-row field-select"><span>八轮塔闲人左右分组</span><select data-config-key="MyDMU_P2Pair2222IdleOddMode"><option value="role">TN 左，DPS 右</option><option value="cone">扇形左，钢铁右</option></select></label>
+            <label class="field-row field-select"><span>八轮塔奇数轮站位</span><select data-config-key="MyDMU_P2OddStrategy"><option value="original">原版：分摊在两侧</option><option value="melee">Uptime：分摊在前</option></select></label>
+            <label class="field-row field-select"><span>末轮塔后站位</span><select data-config-key="MyDMU_P2EndTowerStrategy"><option value="north">固定正北（默认）</option><option value="between">两塔中间</option></select></label>
+            <label class="field-row field-select"><span>三神像绘制范围</span><select data-config-key="MyDMU_P2TrineDrawMode"><option value="preview">当前 + 下一组预览（默认）</option><option value="current">只绘当前组</option></select></label>
+            <label class="field-row"><span>八轮塔播报</span><input type="checkbox" data-config-key="MyDMU_P2TowerCallout"></label>
+            <label class="field-row"><span>行动播报</span><input type="checkbox" data-config-key="MyDMU_P2ActionCallout"></label>
+          </div>
+        </section>
+
+        <section id="phasePanelP3" class="phase-panel" role="tabpanel" aria-labelledby="phaseTabP3" data-phase-panel="p3" hidden>
+          <div class="phase-fields">
+            <label class="field-row"><span>P3 原生绘图</span><input type="checkbox" data-config-key="MyDMU_StringNativeVfxP3"></label>
+            <label class="field-row field-text"><span class="field-label">火 Buff 优先级<small>必须完整填写 8 个不同职能</small></span><input type="text" data-config-key="MyDMU_P3FireBuffOrder" maxlength="128"></label>
+            <label class="field-row field-select"><span>超级跳诱导</span><select data-config-key="MyDMU_P3SuperJumpBait"><option value="legacy">沿用 String 原有引导（默认）</option><option value="D3">MuAi：D3</option><option value="D4">MuAi：D4</option></select></label>
+            <label class="field-row field-select"><span>击退站位方案</span><select data-config-key="MyDMU_P3KnockbackStrategy"><option value="legacy">沿用 String 原有引导（默认）</option><option value="thht">MuAi：THHT</option><option value="hth">MuAi：HTH</option><option value="all">MuAi：8 人一起</option></select></label>
+            <label class="field-row"><span>快乐打击职能扇区</span><input type="checkbox" data-config-key="MyDMU_P3SlapRoleSectors"></label>
+            <label class="field-row"><span>快乐打击个人路线</span><input type="checkbox" data-config-key="MyDMU_P3SlapRouteArrow"></label>
+            <label class="field-row"><span>一运攻击 1 双线预引导</span><input type="checkbox" data-config-key="MyDMU_P3Attack1DoubleTether"></label>
+            <label class="field-row"><span>二运止步 2 双线预引导</span><input type="checkbox" data-config-key="MyDMU_P3Stop2DoubleTether"></label>
+            <label class="field-row field-select"><span>踩塔方案</span><select data-config-key="MyDMU_P3TowerStrategy"><option value="legacy">沿用 String 原有引导（默认）</option><option value="off">关闭额外站位引导</option><option value="nocchh">MuAi：NOCCHH</option><option value="daohuo">MuAi：盗火</option></select></label>
+            <label class="field-row field-select"><span>踩塔面向基准</span><select data-config-key="MyDMU_P3TowerHeading"><option value="heel">Boss 背后（默认）</option><option value="toe">Boss 面前</option></select></label>
+            <label class="field-row field-select"><span>第二次踩塔坐标系</span><select data-config-key="MyDMU_P3TowerFrame"><option value="boss">Boss 相对（默认）</option><option value="arena">场地相对</option></select></label>
+            <label class="field-row"><span>麻将标点</span><input type="checkbox" data-config-key="MyDMU_P3MahjongMarkV3"></label>
+            <label class="field-row"><span>一二三目标标点</span><input type="checkbox" data-config-key="MyDMU_P3TargetMarkV3"></label>
+            <label class="field-row"><span>Debuff 播报</span><input type="checkbox" data-config-key="MyDMU_P3DebuffCallout"></label>
+            <label class="field-row"><span>行动播报</span><input type="checkbox" data-config-key="MyDMU_P3ActionCallout"></label>
+            <label class="field-row field-text"><span>第一目标优先级</span><input type="text" data-config-key="MyDMU_P3TargetFirstPriority" maxlength="128"></label>
+            <label class="field-row field-text"><span>第二目标优先级</span><input type="text" data-config-key="MyDMU_P3TargetSecondPriority" maxlength="128"></label>
+            <label class="field-row field-text"><span>第三目标优先级</span><input type="text" data-config-key="MyDMU_P3TargetThirdPriority" maxlength="128"></label>
+          </div>
+        </section>
+
+        <section id="phasePanelP4" class="phase-panel" role="tabpanel" aria-labelledby="phaseTabP4" data-phase-panel="p4" hidden>
+          <div class="phase-fields">
+            <label class="field-row"><span>P4 原生绘图</span><input type="checkbox" data-config-key="MyDMU_StringNativeVfxP4"></label>
+            <label class="field-row field-select"><span>元素散开方案</span><select data-config-key="MyDMU_P4ElementSpreadStrategy"><option value="d_left">D 左 / TH 右（默认）</option><option value="tn_left">TH 左 / D 右</option></select></label>
+            <label class="field-row field-select"><span>眼睛引导方案</span><select data-config-key="MyDMU_P4EyeStrategy"><option value="fixed">固定站位（默认）</option><option value="eyes_in">眼睛进 / 人群出</option><option value="crowd_static">眼睛动 / 人群不动（MMW）</option><option value="off">关闭个人站位引导</option></select></label>
+            <label class="field-row"><span>Buff 标点</span><input type="checkbox" data-config-key="MyDMU_P4BuffMarkV3"></label>
+            <label class="field-row"><span>聊天框提示</span><input type="checkbox" data-config-key="MyDMU_P4BuffChat"></label>
+            <label class="field-row field-select"><span>聊天频道</span><select data-config-key="MyDMU_P4BuffChatChannel"><option value="e">默语 /e</option><option value="p">小队 /p</option></select></label>
+          </div>
+        </section>
+
+        <section id="phasePanelP5" class="phase-panel" role="tabpanel" aria-labelledby="phaseTabP5" data-phase-panel="p5" hidden>
+          <div class="phase-fields">
+            <label class="field-row"><span>P5 原生绘图</span><input type="checkbox" data-config-key="MyDMU_StringNativeVfxP5"></label>
+            <label class="field-row field-text"><span class="field-label">交响曲八方职能顺序<small>顺时针，必须完整填写 8 个不同职能</small></span><input type="text" data-config-key="MyDMU_P5SymphonyOrder" maxlength="128"></label>
+            <label class="field-row field-select"><span class="field-label">地火预显数量<small>控制提前显示的连续地火枚数</small></span><select data-config-key="MyDMU_P5GroundFireCount"><option value="0">不预显</option><option value="1">预显 1 枚</option><option value="2">预显 2 枚</option><option value="3">预显 3 枚（默认）</option><option value="4">预显 4 枚</option><option value="5">预显 5 枚</option><option value="6">预显 6 枚</option><option value="7">预显完整 7 枚</option></select></label>
+            <label class="field-row"><span class="field-label">地火两步法个人引导<small>对应 MuAi groundFireGuide；危险圆始终独立绘制</small></span><input type="checkbox" data-config-key="MyDMU_P5GroundFireGuideEnabled"></label>
+            <label class="field-row"><span class="field-label">遗弃末世个人引导<small>需同时开启总开关、P5 与个人引导</small></span><input type="checkbox" data-config-key="MyDMU_P5ForsakenGuideEnabled"></label>
+            <label class="field-row field-select"><span class="field-label">遗弃末世起始方向<small>第 1 波站位，后续每波逆时针旋转</small></span><select data-config-key="MyDMU_P5ForsakenStart"><option value="1">左下（默认）</option><option value="2">右下</option><option value="3">右上</option><option value="4">左上</option></select></label>
+            <label class="field-row"><span>减伤提示</span><input type="checkbox" data-config-key="MyDMU_P5MitigationAlert"></label>
+            <label class="field-row field-select"><span>癫狂八方站位</span><select data-config-key="MyDMU_P5SymphonySpreadScheme"><option value="eden">绝伊甸 P1 正八方</option><option value="omega">绝欧米茄 P1 斜八方</option></select></label>
+            <label class="field-row field-select"><span>减伤聊天频道</span><select data-config-key="MyDMU_P5MitigationChannel"><option value="e">默语 /e</option><option value="p">小队 /p</option></select></label>
+          </div>
+        </section>
+      </div>
+
+      <div class="config-actions">
+        <div>
+          <span id="dirtyState">尚未修改</span>
+          <small id="configError"></small>
+        </div>
+        <button id="applyConfigButton" class="button apply-button" type="button">应用本次</button>
+      </div>
+    </section>
   </main>
 
   <template id="roleSlotTemplate">
     <div class="role-slot" draggable="true">
       <div class="role-chip"></div>
+      <img class="job-icon" alt="" aria-hidden="true" hidden>
       <div class="member-cell">
         <div class="member-name"></div>
         <select class="member-select" aria-label="队员"></select>
@@ -43,6 +205,6 @@
     </div>
   </template>
 
-  <script src="./app.js?v=20260622-1"></script>
+  <script src="./app.js?v=20260716-3"></script>
 </body>
 </html>
