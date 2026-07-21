@@ -14,6 +14,7 @@
   const safeEncounterConfig = {
     MyDMU_AutoMarkV5: false,
     MyDMU_LocalMarkV3: false,
+    MyDMU_PartyChatEnabled: false,
     MyDMU_StringNativeVfx: false,
     MyDMU_StringNativeVfxP1: false,
     MyDMU_StringNativeVfxP2: false,
@@ -26,7 +27,6 @@
     MyDMU_P1BeamOrder: 'H2/H1/ST/MT/D1/D2/D3/D4',
     MyDMU_P1Line23Strategy: 'mt_st',
     MyDMU_P1TeleportStrategy: 'standard',
-    MyDMU_ForceTTS: true,
     MyDMU_P2TowerMarkV3: false,
     MyDMU_P2Pair2222IdleOddMode: 'role',
     MyDMU_P2OddStrategy: 'original',
@@ -65,6 +65,15 @@
     MyDMU_P5ForsakenGuideEnabled: true,
     MyDMU_P5ForsakenStart: '1',
   };
+  const combatDisableKeys = new Set([
+    'MyDMU_AutoMarkV5',
+    'MyDMU_PartyChatEnabled',
+    'MyDMU_P1PoisonMarkV3',
+    'MyDMU_P2TowerMarkV3',
+    'MyDMU_P3MahjongMarkV3',
+    'MyDMU_P3TargetMarkV3',
+    'MyDMU_P4BuffMarkV3',
+  ]);
 
   const tankJobs = [1, 3, 19, 21, 32, 37];
   const healerJobs = [6, 24, 28, 33, 40];
@@ -135,6 +144,7 @@
   let resizeRequestSequence = 0;
   let resizeQueue = Promise.resolve();
   let lastResizeKey = '';
+  let resizeErrorMessage = '';
   let configDirty = false;
   let configSaveTimer;
   let configSavePromise = Promise.resolve();
@@ -153,6 +163,8 @@
     activeProfileId: 'default',
     profiles: [{ id: 'default', name: '默认配置' }],
     safeDefaults: { ...safeEncounterConfig },
+    configSchemaVersion: 0,
+    features: {},
     hasPendingChanges: false,
   };
   const overlayReadyCallbacks = [];
@@ -209,6 +221,8 @@
     let draftConfig = { ...demoProfiles.find((profile) => profile.id === activeProfileId).config };
     let state = {
       ...encounterState,
+      configSchemaVersion: 3,
+      features: { partyChatEnabled: true },
       draftConfig: { ...draftConfig },
       activeProfileId,
       profiles: demoProfiles.map(({ id, name }) => ({ id, name })),
@@ -295,6 +309,21 @@
         const locked = state.inEncounter && Boolean(request.inCombat);
         if (locked !== state.locked) {
           updateDemoState({ locked, revision: state.revision + 1 });
+          dispatch({ type: 'StringConfigChanged', state });
+        }
+      } else if (request.action === 'disableCombatOption') {
+        const key = typeof request.key === 'string' ? request.key.trim() : '';
+        if (!state.inEncounter || !state.locked)
+          return { ok: false, error: '仅绝妖星战斗中可关闭已开启的安全开关' };
+        if (!combatDisableKeys.has(key))
+          return { ok: false, error: `战斗中不能修改该设置：${key}` };
+        if (state.config[key] === true || draftConfig[key] === true) {
+          draftConfig = { ...draftConfig, [key]: false };
+          saveActiveDemoProfile();
+          updateDemoState({
+            config: { ...state.config, [key]: false },
+            revision: state.revision + 1,
+          });
           dispatch({ type: 'StringConfigChanged', state });
         }
       } else if (request.action === 'update') {
@@ -935,6 +964,7 @@
 
   async function requestOverlayLayout(mode, requested, requestSequence) {
     let result;
+    let failureMessage = '';
     try {
       result = await window.callOverlayHandler({
         call: 'stringConfig',
@@ -944,7 +974,19 @@
         height: requested.height,
       });
     } catch (error) {
-      console.debug('String Runtime overlay resize failed', error);
+      failureMessage = error?.message ?? String(error);
+    }
+    if (result?.ok !== true) {
+      failureMessage ||= result?.error ?? 'StringDownloader 未返回窗口尺寸';
+      console.warn('String Runtime overlay resize failed:', failureMessage);
+      if (mode === 'config') {
+        resizeErrorMessage = `窗口自动调整失败：${failureMessage}`;
+        configError.textContent = resizeErrorMessage;
+      }
+    } else if (mode === 'config' && resizeErrorMessage !== '') {
+      if (configError.textContent === resizeErrorMessage)
+        configError.textContent = '';
+      resizeErrorMessage = '';
     }
     updateResizeFallback(mode, requested, result, requestSequence);
   }
@@ -1057,10 +1099,13 @@
   }
 
   function readConfigFromForm() {
-    return Object.fromEntries(configControls.map((control) => [
+    const partyChatSupported = encounterState.features?.partyChatEnabled === true;
+    return Object.fromEntries(configControls
+      .filter((control) => control.dataset.configKey !== 'MyDMU_PartyChatEnabled' || partyChatSupported)
+      .map((control) => [
       control.dataset.configKey,
       control.type === 'checkbox' ? control.checked : control.value.trim(),
-    ]));
+      ]));
   }
 
   function p2EightTowerPresetFor(values) {
@@ -1111,14 +1156,29 @@
     }));
   }
 
+  function isCombatDisableEnabled(key) {
+    return encounterState.config?.[key] === true || encounterState.draftConfig?.[key] === true;
+  }
+
   function renderConfigState() {
     const editable = configBackendAvailable && !encounterState.locked;
     const canApply = editable && encounterState.inEncounter;
     const activeProfile = getActiveProfile();
     const hasPendingChanges = configDirty || encounterState.hasPendingChanges;
     configPanel.classList.toggle('locked', encounterState.locked);
-    for (const control of configControls)
-      control.disabled = !editable;
+    for (const control of configControls) {
+      const key = control.dataset.configKey;
+      const supported = key !== 'MyDMU_PartyChatEnabled' ||
+        encounterState.features?.partyChatEnabled === true;
+      const combatDisable = encounterState.locked &&
+        control.type === 'checkbox' && combatDisableKeys.has(key);
+      const canDisableInCombat = configBackendAvailable && supported && combatDisable &&
+        isCombatDisableEnabled(key);
+      if (combatDisable)
+        control.checked = canDisableInCombat;
+      control.disabled = !supported || (!editable && !canDisableInCombat);
+      control.title = supported ? '' : '需要更新 StringDownloader 后使用';
+    }
     if (p2EightTowerPreset !== null)
       p2EightTowerPreset.disabled = !editable;
     configProfileSelect.disabled = !editable;
@@ -1128,9 +1188,11 @@
     applyConfigButton.disabled = !canApply || !hasPendingChanges;
     applyConfigButton.textContent = encounterState.inEncounter ? '应用本次' : '进本后可应用';
     applyConfigButton.title = encounterState.inEncounter ? '' : '进入绝妖星后可应用到当前副本';
-    profileMemoryState.textContent = configDirty
-      ? '正在记忆修改…'
-      : encounterState.inEncounter ? '修改会自动记忆' : '进本时自动载入';
+    profileMemoryState.textContent = encounterState.locked
+      ? '战斗中仅可关闭标点与小队消息'
+      : configDirty
+        ? '正在记忆修改…'
+        : encounterState.inEncounter ? '修改会自动记忆' : '进本时自动载入';
     activeProfileStatus.textContent = activeProfile === undefined
       ? '尚无配置档案'
       : `当前：${activeProfile.name}`;
@@ -1150,10 +1212,10 @@
       configHint.textContent = `可预先编辑“${activeProfile?.name ?? '默认配置'}”；进入绝妖星后自动载入。`;
       dirtyState.textContent = configDirty ? '正在保存到配置档案…' : '已保存到配置档案；进本后自动载入';
     } else if (encounterState.locked) {
-      configStateBadge.textContent = '战斗中锁定';
+      configStateBadge.textContent = '战斗中';
       configStateBadge.className = 'config-state state-locked';
-      configHint.textContent = '当前战斗使用已应用配置；脱战后可以再次修改。';
-      dirtyState.textContent = '战斗中不可修改';
+      configHint.textContent = '战斗中仅可关闭已开启的自动标点或小队消息；关闭后立即阻止后续发送。';
+      dirtyState.textContent = '方案已锁定；标点与小队消息可关闭';
     } else if (hasPendingChanges) {
       configStateBadge.textContent = '待应用';
       configStateBadge.className = 'config-state state-waiting';
@@ -1258,6 +1320,26 @@
       setEncounterState(result.state);
     } catch (error) {
       configError.textContent = error?.message ?? String(error);
+    }
+  }
+
+  async function disableCombatOption(control) {
+    const key = control.dataset.configKey;
+    if (!encounterState.locked || !combatDisableKeys.has(key) ||
+      control.type !== 'checkbox' || control.checked || !isCombatDisableEnabled(key)) {
+      renderConfigState();
+      return;
+    }
+
+    control.disabled = true;
+    configError.textContent = '';
+    try {
+      const result = await callStringConfig('disableCombatOption', { key });
+      setEncounterState(result.state, true);
+    } catch (error) {
+      control.checked = isCombatDisableEnabled(key);
+      configError.textContent = error?.message ?? String(error);
+      renderConfigState();
     }
   }
 
@@ -1385,6 +1467,10 @@
       tab.addEventListener('click', () => setActivePhase(tab.dataset.phase));
     for (const control of configControls) {
       control.addEventListener('change', () => {
+        if (encounterState.locked) {
+          void disableCombatOption(control);
+          return;
+        }
         syncP2EightTowerPreset();
         scheduleDraftSave();
       });
