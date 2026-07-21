@@ -159,12 +159,17 @@
   let compactTimer;
   let selectInteraction;
   let selectInteractionTimer;
-  let selectResizePending = false;
-  let selectResizeResetFallback = false;
+  const customSelects = new WeakMap();
+  let openCustomSelectState;
+  let customSelectSequence = 0;
   let resizeScheduleToken = 0;
   let resizeRequestSequence = 0;
   let resizeQueue = Promise.resolve();
   let lastResizeKey = '';
+  let pendingResizeKey = '';
+  let resizeRetryKey = '';
+  let resizeRetryAttempt = 0;
+  let resizeRetryTimer;
   let resizeErrorMessage = '';
   let configDirty = false;
   let configSaveTimer;
@@ -991,7 +996,6 @@
 
     select.value = selectedName ?? '';
     select.addEventListener('change', () => assignMemberToRole(select.value, role));
-    bindSelectInteraction(select);
     return select;
   }
 
@@ -1048,6 +1052,11 @@
   }
 
   function render() {
+    if (openCustomSelectState !== undefined &&
+        openCustomSelectState.state.root.closest('#roleSlots') !== null)
+      closeCustomSelect(openCustomSelectState.select);
+    for (const select of roleSlots.querySelectorAll('select'))
+      customSelects.get(select)?.observer.disconnect();
     roleSlots.replaceChildren();
     const duplicateRoles = getDuplicateRoles();
 
@@ -1082,6 +1091,7 @@
         openMemberSelect(select);
       });
       slot.querySelector('.member-select').replaceWith(select);
+      bindSelectInteraction(select);
       bindPointerDrag(memberName, select, slot, role);
       roleSlots.append(slot);
     }
@@ -1103,19 +1113,7 @@
   }
 
   function openMemberSelect(select) {
-    beginSelectInteraction(select);
-    try {
-      select.focus({ preventScroll: true });
-    } catch {
-      select.focus();
-    }
-    if (typeof select.showPicker !== 'function')
-      return;
-    try {
-      select.showPicker();
-    } catch {
-      // showPicker only works during direct user activation on some Chromium versions.
-    }
+    openCustomSelect(select);
   }
 
   function bindPointerDrag(handle, select, slot, role) {
@@ -1288,7 +1286,43 @@
     document.documentElement.classList.toggle('resize-fallback', mode === 'config' && clipped);
   }
 
-  async function requestOverlayLayout(mode, requested, requestSequence) {
+  function resetOverlayResizeRetry() {
+    clearTimeout(resizeRetryTimer);
+    resizeRetryTimer = undefined;
+    resizeRetryKey = '';
+    resizeRetryAttempt = 0;
+  }
+
+  function scheduleOverlayResizeRetry(resizeKey, requestSequence) {
+    if (requestSequence !== resizeRequestSequence)
+      return;
+    if (resizeRetryKey !== resizeKey) {
+      resetOverlayResizeRetry();
+      resizeRetryKey = resizeKey;
+    }
+    const retryDelays = [250, 500, 1000];
+    if (resizeRetryAttempt >= retryDelays.length)
+      return;
+    const delay = retryDelays[resizeRetryAttempt++];
+    clearTimeout(resizeRetryTimer);
+    resizeRetryTimer = window.setTimeout(() => {
+      resizeRetryTimer = undefined;
+      if (requestSequence === resizeRequestSequence)
+        scheduleOverlayResize(true);
+    }, delay);
+  }
+
+  function updateDisconnectedResizeFallback() {
+    document.documentElement.classList.remove('resize-fallback');
+    if (currentLayoutMode() !== 'config')
+      return;
+    const natural = measureOverlayLayout();
+    const clipped = natural.width > document.documentElement.clientWidth ||
+      natural.height > document.documentElement.clientHeight;
+    document.documentElement.classList.toggle('resize-fallback', clipped);
+  }
+
+  async function requestOverlayLayout(mode, requested, requestSequence, resizeKey) {
     let result;
     let failureMessage = '';
     try {
@@ -1302,42 +1336,66 @@
     } catch (error) {
       failureMessage = error?.message ?? String(error);
     }
+    const currentRequest = requestSequence === resizeRequestSequence;
     if (result?.ok !== true) {
       failureMessage ||= result?.error ?? 'StringDownloader 未返回窗口尺寸';
+      if (currentRequest)
+        lastResizeKey = '';
       console.warn('String Runtime overlay resize failed:', failureMessage);
       if (mode === 'config') {
         resizeErrorMessage = `窗口自动调整失败：${failureMessage}`;
         configError.textContent = resizeErrorMessage;
       }
-    } else if (mode === 'config' && resizeErrorMessage !== '') {
-      if (configError.textContent === resizeErrorMessage)
-        configError.textContent = '';
-      resizeErrorMessage = '';
+    } else {
+      if (currentRequest) {
+        lastResizeKey = resizeKey;
+        resetOverlayResizeRetry();
+      }
+      if (mode === 'config' && resizeErrorMessage !== '') {
+        if (configError.textContent === resizeErrorMessage)
+          configError.textContent = '';
+        resizeErrorMessage = '';
+      }
     }
+    if (currentRequest && pendingResizeKey === resizeKey)
+      pendingResizeKey = '';
     updateResizeFallback(mode, requested, result, requestSequence);
+    if (result?.ok !== true && currentRequest)
+      scheduleOverlayResizeRetry(resizeKey, requestSequence);
   }
 
   function scheduleOverlayResize(resetFallback = false) {
-    if (resetFallback)
-      document.documentElement.classList.remove('resize-fallback');
-    if (selectInteraction !== undefined) {
-      selectResizePending = true;
-      selectResizeResetFallback ||= resetFallback;
+    const canRequestResize = overlayConnected && typeof window.callOverlayHandler === 'function';
+    if (!canRequestResize) {
+      updateDisconnectedResizeFallback();
+      resetOverlayResizeRetry();
       return;
     }
+    if (!resetFallback && document.documentElement.classList.contains('resize-fallback'))
+      return;
+    if (resetFallback)
+      document.documentElement.classList.remove('resize-fallback');
     const scheduleToken = ++resizeScheduleToken;
     window.requestAnimationFrame(() => window.requestAnimationFrame(() => {
-      if (scheduleToken !== resizeScheduleToken || !overlayConnected ||
-        typeof window.callOverlayHandler !== 'function')
+      if (scheduleToken !== resizeScheduleToken)
         return;
+      if (!overlayConnected || typeof window.callOverlayHandler !== 'function') {
+        updateDisconnectedResizeFallback();
+        resetOverlayResizeRetry();
+        return;
+      }
       const mode = currentLayoutMode();
       const requested = measureOverlayLayout();
       const resizeKey = `${mode}:${requested.width}x${requested.height}`;
-      if (!resetFallback && resizeKey === lastResizeKey)
+      if (resizeRetryKey !== '' && resizeRetryKey !== resizeKey)
+        resetOverlayResizeRetry();
+      if (!resetFallback && (resizeKey === lastResizeKey || resizeKey === pendingResizeKey))
         return;
-      lastResizeKey = resizeKey;
+      clearTimeout(resizeRetryTimer);
+      resizeRetryTimer = undefined;
+      pendingResizeKey = resizeKey;
       const requestSequence = ++resizeRequestSequence;
-      const resize = () => requestOverlayLayout(mode, requested, requestSequence);
+      const resize = () => requestOverlayLayout(mode, requested, requestSequence, resizeKey);
       resizeQueue = resizeQueue.then(resize, resize);
     }));
   }
@@ -1366,60 +1424,229 @@
 
   function scheduleCompactMode() {
     clearTimeout(compactTimer);
-    if (pointerInside || pointerDragState !== undefined || selectInteraction !== undefined)
+    if (pointerInside || pointerDragState !== undefined)
       return;
     compactTimer = window.setTimeout(() => {
+      if (pointerInside || pointerDragState !== undefined)
+        return;
+      if (selectInteraction !== undefined)
+        closeCustomSelect(selectInteraction);
       if (!pointerInside && pointerDragState === undefined && selectInteraction === undefined)
         setCompactMode(true);
     }, 180);
   }
 
-  function flushSelectResize() {
-    if (!selectResizePending)
-      return;
-    const resetFallback = selectResizeResetFallback;
-    selectResizePending = false;
-    selectResizeResetFallback = false;
-    scheduleOverlayResize(resetFallback);
-  }
-
-  function endSelectInteraction(select, flushResize = true) {
+  function endSelectInteraction(select) {
     if (selectInteraction !== select)
       return;
     selectInteraction = undefined;
     clearTimeout(selectInteractionTimer);
-    if (flushResize)
-      flushSelectResize();
   }
 
   function beginSelectInteraction(select) {
     selectInteraction = select;
     clearTimeout(compactTimer);
     clearTimeout(selectInteractionTimer);
-    resizeScheduleToken += 1;
-    selectResizePending = true;
-    selectInteractionTimer = window.setTimeout(() => endSelectInteraction(select, false), 30000);
+    selectInteractionTimer = window.setTimeout(() => closeCustomSelect(select), 30000);
+  }
+
+  function selectedOptionFor(select) {
+    return [...select.options].find((option) => option.value === select.value) ??
+      [...select.options].find((option) => !option.disabled) ?? select.options[0];
+  }
+
+  function renderCustomSelectOptions(select) {
+    const state = customSelects.get(select);
+    if (state === undefined)
+      return;
+    const selectedValue = select.value;
+    state.options.replaceChildren(...[...select.options].map((option) => {
+      const item = document.createElement('button');
+      item.type = 'button';
+      item.className = 'string-combobox-option';
+      item.dataset.value = option.value;
+      item.textContent = option.textContent ?? option.value;
+      item.disabled = select.disabled || option.disabled;
+      item.setAttribute('role', 'option');
+      item.setAttribute('aria-selected', option.value === selectedValue ? 'true' : 'false');
+      item.addEventListener('click', (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        if (select.disabled || item.disabled)
+          return;
+        const changed = select.value !== option.value;
+        select.value = option.value;
+        closeCustomSelect(select);
+        syncCustomSelect(select);
+        if (changed)
+          select.dispatchEvent(new Event('change', { bubbles: true }));
+      });
+      return item;
+    }));
+  }
+
+  function syncCustomSelect(select) {
+    const state = customSelects.get(select);
+    if (state === undefined)
+      return;
+    const selected = selectedOptionFor(select);
+    state.value.textContent = selected?.textContent?.trim() || '请选择';
+    state.trigger.disabled = select.disabled;
+    state.root.dataset.disabled = select.disabled ? 'true' : 'false';
+    if (select.disabled && state.root.dataset.open === 'true') {
+      closeCustomSelect(select);
+      return;
+    }
+    if (state.root.dataset.open === 'true') {
+      renderCustomSelectOptions(select);
+      scheduleOverlayResize(true);
+    }
+  }
+
+  function syncCustomSelects(selects = document.querySelectorAll('select')) {
+    for (const select of selects)
+      syncCustomSelect(select);
+  }
+
+  function closeCustomSelect(select = openCustomSelectState?.select, restoreFocus = false) {
+    if (!(select instanceof HTMLSelectElement))
+      return;
+    const state = customSelects.get(select);
+    if (state === undefined || state.root.dataset.open !== 'true') {
+      endSelectInteraction(select);
+      return;
+    }
+    state.root.dataset.open = 'false';
+    state.trigger.setAttribute('aria-expanded', 'false');
+    state.options.hidden = true;
+    if (openCustomSelectState?.select === select)
+      openCustomSelectState = undefined;
+    endSelectInteraction(select);
+    if (restoreFocus && !state.trigger.disabled)
+      state.trigger.focus({ preventScroll: true });
+    scheduleOverlayResize(true);
+    scheduleCompactMode();
+  }
+
+  function openCustomSelect(select) {
+    if (!(select instanceof HTMLSelectElement) || select.disabled)
+      return;
+    let state = customSelects.get(select);
+    if (state === undefined) {
+      enhanceCustomSelect(select);
+      state = customSelects.get(select);
+    }
+    if (state === undefined)
+      return;
+    if (openCustomSelectState?.select !== select)
+      closeCustomSelect(openCustomSelectState?.select);
+    renderCustomSelectOptions(select);
+    state.root.dataset.open = 'true';
+    state.trigger.setAttribute('aria-expanded', 'true');
+    state.options.hidden = false;
+    openCustomSelectState = { select, state };
+    beginSelectInteraction(select);
+    scheduleOverlayResize(true);
+  }
+
+  function enhanceCustomSelect(select) {
+    if (!(select instanceof HTMLSelectElement))
+      return;
+    if (customSelects.has(select)) {
+      syncCustomSelect(select);
+      return;
+    }
+    if (select.parentElement === null)
+      return;
+
+    const root = document.createElement('div');
+    root.className = 'string-combobox';
+    if (select.classList.contains('member-select'))
+      root.classList.add('member-combobox');
+    root.dataset.open = 'false';
+
+    const trigger = document.createElement('button');
+    trigger.type = 'button';
+    trigger.className = 'string-combobox-trigger';
+    trigger.setAttribute('aria-haspopup', 'listbox');
+    trigger.setAttribute('aria-expanded', 'false');
+    const label = select.getAttribute('aria-label');
+    if (label !== null)
+      trigger.setAttribute('aria-label', label);
+
+    const value = document.createElement('span');
+    value.className = 'string-combobox-value';
+    const caret = document.createElement('span');
+    caret.className = 'string-combobox-caret';
+    caret.setAttribute('aria-hidden', 'true');
+    trigger.append(value, caret);
+
+    const options = document.createElement('div');
+    options.id = `string-combobox-options-${++customSelectSequence}`;
+    options.className = 'string-combobox-options';
+    options.setAttribute('role', 'listbox');
+    options.hidden = true;
+    trigger.setAttribute('aria-controls', options.id);
+    root.append(trigger, options);
+
+    select.classList.add('native-select-model');
+    select.tabIndex = -1;
+    select.setAttribute('aria-hidden', 'true');
+    select.insertAdjacentElement('afterend', root);
+
+    const state = { root, trigger, value, options };
+    customSelects.set(select, state);
+    trigger.addEventListener('click', (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      if (root.dataset.open === 'true')
+        closeCustomSelect(select);
+      else
+        openCustomSelect(select);
+    });
+    const implicitLabel = select.closest('label');
+    implicitLabel?.addEventListener('click', (event) => {
+      if (event.defaultPrevented || event.target === select ||
+        (event.target instanceof Node && root.contains(event.target)))
+        return;
+      event.preventDefault();
+      openCustomSelect(select);
+    });
+    trigger.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        closeCustomSelect(select);
+        return;
+      }
+      if (event.key !== 'Enter' && event.key !== ' ' && event.key !== 'ArrowDown')
+        return;
+      event.preventDefault();
+      openCustomSelect(select);
+    });
+    select.addEventListener('change', () => syncCustomSelect(select));
+    const observer = new MutationObserver(() => syncCustomSelect(select));
+    observer.observe(select, {
+      attributes: true,
+      attributeFilter: ['disabled'],
+      childList: true,
+      subtree: true,
+    });
+    state.observer = observer;
+    syncCustomSelect(select);
   }
 
   function bindSelectInteraction(select) {
-    select.addEventListener('pointerdown', () => beginSelectInteraction(select));
-    select.addEventListener('change', () => window.setTimeout(() => endSelectInteraction(select), 0));
-    select.addEventListener('keydown', (event) => {
-      const opensPicker = event.key === 'Enter' || event.key === ' ' || event.key === 'F4' ||
-        (event.altKey && event.key === 'ArrowDown');
-      if (opensPicker)
-        beginSelectInteraction(select);
-      else if (event.key === 'Escape')
-        window.setTimeout(() => endSelectInteraction(select), 0);
-    });
+    enhanceCustomSelect(select);
   }
 
   function setView(view) {
+    closeCustomSelect();
     activeView = view === 'config' ? 'config' : 'roles';
     renderActiveView(true);
   }
 
   function setActivePhase(phase) {
+    closeCustomSelect();
     activePhase = phaseTabs.some((tab) => tab.dataset.phase === phase) ? phase : 'p1';
     for (const tab of phaseTabs) {
       const selected = tab.dataset.phase === activePhase;
@@ -1441,6 +1668,7 @@
         control.value = value;
     }
     syncP2EightTowerPreset(values);
+    syncCustomSelects([...configControls, p2EightTowerPreset, configProfileSelect].filter(Boolean));
     configFormInitialized = true;
     configDirty = false;
   }
@@ -1465,8 +1693,10 @@
   }
 
   function syncP2EightTowerPreset(values = readConfigFromForm()) {
-    if (p2EightTowerPreset !== null)
+    if (p2EightTowerPreset !== null) {
       p2EightTowerPreset.value = p2EightTowerPresetFor(values);
+      syncCustomSelect(p2EightTowerPreset);
+    }
   }
 
   function applyP2EightTowerPreset() {
@@ -1481,6 +1711,8 @@
     }
     configControlByKey.MyDMU_P2Pair2222IdleOddMode.value = mapping[0];
     configControlByKey.MyDMU_P2OddStrategy.value = mapping[1];
+    syncCustomSelect(configControlByKey.MyDMU_P2Pair2222IdleOddMode);
+    syncCustomSelect(configControlByKey.MyDMU_P2OddStrategy);
     syncP2EightTowerPreset();
     scheduleDraftSave();
   }
@@ -1512,6 +1744,7 @@
       option.selected = profile.id === selectedId;
       return option;
     }));
+    syncCustomSelect(configProfileSelect);
   }
 
   function isCombatDisableEnabled(key) {
@@ -1544,6 +1777,7 @@
     saveProfileButton.disabled = !editable || profileNameInput.value.trim() === '';
     restoreDefaultsButton.disabled = !editable;
     applyConfigButton.disabled = !editable;
+    syncCustomSelects([...configControls, p2EightTowerPreset, configProfileSelect].filter(Boolean));
     applyConfigButton.textContent = configBackendAvailable && encounterState.inEncounter
       ? '保存并生效'
       : '保存设置';
@@ -2253,17 +2487,14 @@
       const activeSelect = selectInteraction;
       if (activeSelect === undefined)
         return;
-      if (event.target instanceof Node && activeSelect.contains(event.target))
+      const activeState = customSelects.get(activeSelect);
+      if (event.target instanceof Node && activeState?.root.contains(event.target))
         return;
-      endSelectInteraction(activeSelect);
+      closeCustomSelect(activeSelect);
     }, true);
     appShell.addEventListener('pointerenter', () => {
       pointerInside = true;
       clearTimeout(compactTimer);
-      if (selectInteraction !== undefined)
-        endSelectInteraction(selectInteraction);
-      else
-        flushSelectResize();
       setCompactMode(false);
     });
     appShell.addEventListener('pointerleave', () => {
