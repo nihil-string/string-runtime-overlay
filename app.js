@@ -60,7 +60,7 @@
     MyDMU_P4ElementSpreadStrategy: 'd_left',
     MyDMU_P4EyeStrategy: 'fixed',
     MyDMU_P5MitigationAlert: true,
-    MyDMU_P5SymphonySpreadScheme: 'eden',
+    MyDMU_P5SymphonySpreadScheme: 'regular',
     MyDMU_P5SymphonyOrder: 'H2/D2/D4/ST/MT/D3/H1/D1',
     MyDMU_P5MitigationChannel: 'e',
     MyDMU_P5GroundFireCount: '3',
@@ -91,7 +91,6 @@
     MyDMU_P4BuffChatChannel: new Set(['e', 'p']),
     MyDMU_P5MitigationChannel: new Set(['e', 'p']),
   };
-
   const tankJobs = [1, 3, 19, 21, 32, 37];
   const healerJobs = [6, 24, 28, 33, 40];
   const dpsJobs = [2, 4, 5, 7, 20, 22, 23, 25, 26, 27, 29, 30, 31, 34, 35, 36, 38, 39, 41, 42];
@@ -196,7 +195,7 @@
     activeProfileId: initialLocalProfile.id,
     profiles: localConfigStore.profiles.map(({ id, name }) => ({ id, name })),
     safeDefaults: { ...safeEncounterConfig },
-    configSchemaVersion: 3,
+    configSchemaVersion: 4,
     features: { partyChatEnabled: true },
     hasPendingChanges: false,
   };
@@ -246,7 +245,7 @@
           ...safeEncounterConfig,
           MyDMU_P2OddStrategy: 'melee',
           MyDMU_P4BuffChatChannel: 'p',
-          MyDMU_P5SymphonySpreadScheme: 'omega',
+          MyDMU_P5SymphonySpreadScheme: 'leaning',
         },
       },
     ];
@@ -256,7 +255,7 @@
     let state = {
       ...encounterState,
       instanceId: demoInstanceId,
-      configSchemaVersion: 3,
+      configSchemaVersion: 4,
       features: { partyChatEnabled: true },
       draftConfig: { ...draftConfig },
       activeProfileId,
@@ -619,9 +618,10 @@
     const source = input !== null && typeof input === 'object' && !Array.isArray(input)
       ? input
       : {};
+    const canonicalFallback = fallback;
     const normalized = { ...safeEncounterConfig };
     for (const [key, defaultValue] of Object.entries(safeEncounterConfig)) {
-      const fallbackValue = fallback?.[key];
+      const fallbackValue = canonicalFallback?.[key];
       if (typeof fallbackValue === typeof defaultValue)
         normalized[key] = fallbackValue;
       const value = source[key];
@@ -647,8 +647,8 @@
         const options = [...control.options].map((option) => option.value);
         if (options.includes(text))
           normalized[key] = text;
-        else if (options.includes(String(fallback?.[key] ?? '')))
-          normalized[key] = String(fallback[key]);
+        else if (options.includes(String(canonicalFallback?.[key] ?? '')))
+          normalized[key] = String(canonicalFallback[key]);
         else
           normalized[key] = safeEncounterConfig[key];
         continue;
@@ -658,7 +658,9 @@
     }
     for (const [key, values] of Object.entries(hiddenSelectValues)) {
       if (!values.has(normalized[key]))
-        normalized[key] = values.has(fallback?.[key]) ? fallback[key] : safeEncounterConfig[key];
+        normalized[key] = values.has(canonicalFallback?.[key])
+          ? canonicalFallback[key]
+          : safeEncounterConfig[key];
     }
     return normalized;
   }
@@ -698,7 +700,7 @@
 
   function createDefaultLocalConfigStore() {
     return {
-      version: 1,
+      version: 2,
       revision: 0,
       activeProfileId: 'default',
       pendingBridgeSync: false,
@@ -714,6 +716,7 @@
     const profiles = [];
     const ids = new Set();
     const names = new Set();
+    let migrated = saved.version !== 2;
     for (const item of Array.isArray(saved.profiles) ? saved.profiles.slice(0, 20) : []) {
       const id = typeof item?.id === 'string' ? item.id.trim() : '';
       let name;
@@ -727,10 +730,20 @@
         continue;
       ids.add(id);
       names.add(normalizedName);
+      const persistedConfig = item?.config !== null && typeof item?.config === 'object' &&
+        !Array.isArray(item.config)
+        ? { ...item.config }
+        : item?.config;
+      const legacySpreadScheme = persistedConfig?.MyDMU_P5SymphonySpreadScheme;
+      if (legacySpreadScheme === 'eden')
+        persistedConfig.MyDMU_P5SymphonySpreadScheme = 'regular';
+      else if (legacySpreadScheme === 'omega')
+        persistedConfig.MyDMU_P5SymphonySpreadScheme = 'leaning';
+      migrated ||= legacySpreadScheme === 'eden' || legacySpreadScheme === 'omega';
       profiles.push({
         id,
         name,
-        config: normalizeLocalConfig(item?.config),
+        config: normalizeLocalConfig(persistedConfig),
       });
     }
     if (profiles.length === 0)
@@ -739,13 +752,21 @@
     const activeProfileId = profiles.some((profile) => profile.id === saved.activeProfileId)
       ? saved.activeProfileId
       : profiles[0].id;
-    return {
-      version: 1,
+    const store = {
+      version: 2,
       revision: Number.isSafeInteger(saved.revision) && saved.revision >= 0 ? saved.revision : 0,
       activeProfileId,
-      pendingBridgeSync: saved.pendingBridgeSync === true,
+      pendingBridgeSync: saved.pendingBridgeSync === true || migrated,
       profiles,
     };
+    if (migrated) {
+      try {
+        writeJson(configStorageKey, store);
+      } catch (error) {
+        console.warn('String 本地配置旧值迁移写回失败', error);
+      }
+    }
+    return store;
   }
 
   function getLocalActiveProfile(store = localConfigStore) {
@@ -1221,7 +1242,10 @@
   }
 
   function handlePrimaryPlayer(event) {
-    currentPlayerName = cleanName(event?.charName ?? event?.name);
+    const nextPlayerName = cleanName(event?.charName ?? event?.name);
+    if (nextPlayerName !== '' && nextPlayerName !== currentPlayerName)
+      setView('roles');
+    currentPlayerName = nextPlayerName;
     render();
   }
 
@@ -1699,6 +1723,22 @@
     }
   }
 
+  function applyP3TowerPresetAxes() {
+    const strategy = configControlByKey.MyDMU_P3TowerStrategy?.value;
+    const mapping = {
+      nocchh: ['heel', 'arena'],
+      daohuo: ['heel', 'boss'],
+    }[strategy];
+    if (mapping === undefined)
+      return;
+    const heading = configControlByKey.MyDMU_P3TowerHeading;
+    const frame = configControlByKey.MyDMU_P3TowerFrame;
+    heading.value = mapping[0];
+    frame.value = mapping[1];
+    syncCustomSelect(heading);
+    syncCustomSelect(frame);
+  }
+
   function applyP2EightTowerPreset() {
     const mapping = {
       role_fixed: ['role', 'original'],
@@ -1876,6 +1916,7 @@
       activeBackendInstanceId = instanceId;
       latestBackendRevision = -1;
       backendConfigProfiles = [];
+      setView('roles');
     }
     const revision = Number(state?.revision);
     if (!Number.isSafeInteger(revision) || revision < 0)
@@ -1896,16 +1937,22 @@
     if (state?.config === undefined || !acceptBackendRevision(state))
       return false;
     rememberBackendProfileMetadata(state);
+    const config = { ...safeEncounterConfig, ...state.config };
+    const draftConfig = {
+      ...safeEncounterConfig,
+      ...(state.draftConfig ?? state.config ?? encounterState.draftConfig),
+    };
+    const safeDefaults = {
+      ...safeEncounterConfig,
+      ...(state.safeDefaults ?? {}),
+    };
     encounterState = {
       ...encounterState,
       ...state,
-      config: { ...safeEncounterConfig, ...state.config },
-      draftConfig: {
-        ...safeEncounterConfig,
-        ...(state.draftConfig ?? state.config ?? encounterState.draftConfig),
-      },
+      config,
+      draftConfig,
       profiles: Array.isArray(state.profiles) ? state.profiles : encounterState.profiles,
-      safeDefaults: { ...safeEncounterConfig, ...(state.safeDefaults ?? {}) },
+      safeDefaults,
     };
     renderProfileOptions();
     if (syncForm || !configFormInitialized)
@@ -1919,16 +1966,20 @@
       return false;
     rememberBackendProfileMetadata(state);
     const profile = getLocalActiveProfile();
+    const config = { ...safeEncounterConfig, ...state.config };
     encounterState = {
       ...encounterState,
       ...state,
-      config: { ...safeEncounterConfig, ...state.config },
+      config,
       draftConfig: { ...profile.config },
       activeProfileId: profile.id,
       profiles: Array.isArray(state.profiles) ? state.profiles : encounterState.profiles,
-      safeDefaults: { ...safeEncounterConfig, ...(state.safeDefaults ?? {}) },
+      safeDefaults: {
+        ...safeEncounterConfig,
+        ...(state.safeDefaults ?? {}),
+      },
       hasPendingChanges: state.inEncounter === true &&
-        JSON.stringify({ ...safeEncounterConfig, ...state.config }) !== JSON.stringify(profile.config),
+        JSON.stringify(config) !== JSON.stringify(profile.config),
     };
     updateEncounterFromLocal(false);
     return true;
@@ -2202,14 +2253,11 @@
       }
       renderConfigState();
     }
-    if (zoneId === dancingMadUltimateZoneId)
-      setView('config');
   }
 
   function handleStringConfigChanged(event) {
     if (isStaleBackendState(event?.state))
       return;
-    const previousZoneId = encounterState.zoneId;
     configBackendAvailable = true;
     try {
       if (configDirty)
@@ -2229,8 +2277,6 @@
       return;
     }
     adoptBackendState(event?.state, true);
-    if (encounterState.zoneId === dancingMadUltimateZoneId && previousZoneId !== encounterState.zoneId)
-      setView('config');
   }
 
   async function handleCombatChanged(event) {
@@ -2469,6 +2515,8 @@
           void disableCombatOption(control);
           return;
         }
+        if (control.dataset.configKey === 'MyDMU_P3TowerStrategy')
+          applyP3TowerPresetAxes();
         syncP2EightTowerPreset();
         scheduleDraftSave();
       });
