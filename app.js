@@ -11,9 +11,11 @@
   const demoMode = new URLSearchParams(window.location.search).get('demo') === '1';
   const storageKey = demoMode ? 'string-runtime-role-map-demo-v1' : 'string-runtime-role-map-v1';
   const configStorageKey = demoMode
-    ? 'string-runtime-encounter-config-demo-v1'
+    ? 'string-runtime-encounter-config-demo-v2'
     : 'string-runtime-encounter-config-v1';
   const dancingMadUltimateZoneId = 1363;
+  const defaultProfileId = 'default';
+  const defaultProfileName = '默认配置';
   const safeEncounterConfig = {
     MyDMU_AutoMarkV5: false,
     MyDMU_LocalMarkV3: false,
@@ -33,6 +35,7 @@
     MyDMU_P2TowerMarkV3: false,
     MyDMU_P2Pair2222IdleOddMode: 'role',
     MyDMU_P2OddStrategy: 'original',
+    MyDMU_P2UseBbyPos: false,
     MyDMU_P2EndTowerStrategy: 'north',
     MyDMU_P2TrineDrawMode: 'preview',
     MyDMU_P2TowerCallout: false,
@@ -40,13 +43,13 @@
     MyDMU_P3MahjongMarkV3: false,
     MyDMU_P3TargetMarkV3: false,
     MyDMU_P3FireBuffOrder: 'MT/ST/H1/H2/D1/D2/D3/D4',
-    MyDMU_P3SuperJumpBait: 'legacy',
-    MyDMU_P3KnockbackStrategy: 'legacy',
-    MyDMU_P3SlapRoleSectors: true,
-    MyDMU_P3SlapRouteArrow: true,
+    MyDMU_P3SuperJumpBait: 'D3',
+    MyDMU_P3KnockbackStrategy: 'thht',
+    MyDMU_P3SlapRoleSectors: false,
+    MyDMU_P3SlapRouteArrow: false,
     MyDMU_P3Attack1DoubleTether: false,
     MyDMU_P3Stop2DoubleTether: false,
-    MyDMU_P3TowerStrategy: 'legacy',
+    MyDMU_P3TowerStrategy: 'nocchh',
     MyDMU_P3TowerHeading: 'heel',
     MyDMU_P3TowerFrame: 'boss',
     MyDMU_P3TargetFirstPriority: 'D1/D2/D3/D4/MT/ST/H2/H1',
@@ -64,8 +67,8 @@
     MyDMU_P5SymphonyOrder: 'H2/D2/D4/ST/MT/D3/H1/D1',
     MyDMU_P5MitigationChannel: 'e',
     MyDMU_P5GroundFireCount: '3',
-    MyDMU_P5GroundFireGuideEnabled: true,
-    MyDMU_P5ForsakenGuideEnabled: true,
+    MyDMU_P5GroundFireGuideEnabled: false,
+    MyDMU_P5ForsakenGuideEnabled: false,
     MyDMU_P5ForsakenStart: '1',
   };
   const combatDisableKeys = new Set([
@@ -91,6 +94,19 @@
     MyDMU_P4BuffChatChannel: new Set(['e', 'p']),
     MyDMU_P5MitigationChannel: new Set(['e', 'p']),
   };
+  const priorityGroupRoles = {
+    T: ['MT', 'ST'],
+    H: ['H1', 'H2'],
+    D: ['D1', 'D2', 'D3', 'D4'],
+  };
+  const priorityGroupOrder = ['T', 'D', 'H'];
+  const priorityGroupLabels = {
+    T: 'T',
+    D: 'D',
+    H: 'N',
+  };
+  const priorityRoleGroups = Object.fromEntries(Object.entries(priorityGroupRoles)
+    .flatMap(([group, groupRoles]) => groupRoles.map((role) => [role, group])));
   const tankJobs = [1, 3, 19, 21, 32, 37];
   const healerJobs = [6, 24, 28, 33, 40];
   const dpsJobs = [2, 4, 5, 7, 20, 22, 23, 25, 26, 27, 29, 30, 31, 34, 35, 36, 38, 39, 41, 42];
@@ -127,12 +143,7 @@
   const configTabDot = document.getElementById('configTabDot');
   const configHint = document.getElementById('configHint');
   const configStateBadge = document.getElementById('configStateBadge');
-  const configProfileSelect = document.getElementById('configProfileSelect');
-  const profileNameInput = document.getElementById('profileNameInput');
-  const saveProfileButton = document.getElementById('saveProfileButton');
-  const restoreDefaultsButton = document.getElementById('restoreDefaultsButton');
   const profileMemoryState = document.getElementById('profileMemoryState');
-  const activeProfileStatus = document.getElementById('activeProfileStatus');
   const dirtyState = document.getElementById('dirtyState');
   const configError = document.getElementById('configError');
   const applyConfigButton = document.getElementById('applyConfigButton');
@@ -142,6 +153,12 @@
   const p2EightTowerPreset = document.getElementById('p2EightTowerPreset');
   const phaseTabs = [...document.querySelectorAll('[data-phase]')];
   const phasePanels = [...document.querySelectorAll('[data-phase-panel]')];
+  const priorityEditors = [...document.querySelectorAll('[data-priority-editor]')];
+  const prioritySets = [...document.querySelectorAll('[data-priority-set]')];
+  const roleOrderEditors = [...document.querySelectorAll('[data-role-order-editor]')];
+  const priorityEditorStates = new WeakMap();
+  const roleOrderEditorStates = new WeakMap();
+  let priorityDragState;
   let localConfigStore = readLocalConfigStore();
   const initialLocalProfile = getLocalActiveProfile(localConfigStore);
 
@@ -150,12 +167,10 @@
   let pendingBroadcastTimer;
   let pointerDragState;
   let currentPlayerName = '';
+  let arrReplayPartyActive = false;
   let overlayConnected = false;
   let activeView = 'roles';
   let activePhase = 'p1';
-  let compactMode = true;
-  let pointerInside = false;
-  let compactTimer;
   let selectInteraction;
   let selectInteractionTimer;
   const customSelects = new WeakMap();
@@ -195,7 +210,7 @@
     activeProfileId: initialLocalProfile.id,
     profiles: localConfigStore.profiles.map(({ id, name }) => ({ id, name })),
     safeDefaults: { ...safeEncounterConfig },
-    configSchemaVersion: 4,
+    configSchemaVersion: 6,
     features: { partyChatEnabled: true },
     hasPendingChanges: false,
   };
@@ -232,30 +247,19 @@
 
     const subscribers = {};
     const demoProfiles = [
-      { id: 'default', name: '默认配置', config: { ...safeEncounterConfig } },
       {
-        id: 'progression',
-        name: '开荒配置',
-        config: { ...safeEncounterConfig, MyDMU_P2TowerCallout: true },
-      },
-      {
-        id: 'static',
-        name: '固定队配置',
-        config: {
-          ...safeEncounterConfig,
-          MyDMU_P2OddStrategy: 'melee',
-          MyDMU_P4BuffChatChannel: 'p',
-          MyDMU_P5SymphonySpreadScheme: 'leaning',
-        },
+        id: defaultProfileId,
+        name: defaultProfileName,
+        config: normalizeLocalConfigForSave(initialLocalProfile.config),
       },
     ];
-    let activeProfileId = 'static';
-    let draftConfig = { ...demoProfiles.find((profile) => profile.id === activeProfileId).config };
+    let activeProfileId = defaultProfileId;
+    let draftConfig = { ...demoProfiles[0].config };
     const demoInstanceId = `demo-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
     let state = {
       ...encounterState,
       instanceId: demoInstanceId,
-      configSchemaVersion: 4,
+      configSchemaVersion: 6,
       features: { partyChatEnabled: true },
       draftConfig: { ...draftConfig },
       activeProfileId,
@@ -366,27 +370,18 @@
         updateDemoState({ revision: state.revision + 1 });
         dispatch({ type: 'StringConfigChanged', state });
       } else if (request.action === 'selectProfile') {
-        const profile = demoProfiles.find((item) => item.id === request.profileId);
-        if (profile === undefined)
+        if (request.profileId !== defaultProfileId)
           return { ok: false, error: '配置档案不存在' };
-        activeProfileId = profile.id;
-        draftConfig = { ...profile.config };
+        activeProfileId = defaultProfileId;
+        draftConfig = { ...demoProfiles[0].config };
         updateDemoState({ revision: state.revision + 1 });
         dispatch({ type: 'StringConfigChanged', state });
       } else if (request.action === 'saveProfile') {
-        const name = request.name?.trim();
-        if (!name)
-          return { ok: false, error: '请输入配置名称' };
+        if (request.name?.trim() !== defaultProfileName)
+          return { ok: false, error: '只允许保存默认配置' };
         draftConfig = { ...safeEncounterConfig, ...request.config };
-        let profile = demoProfiles.find((item) => item.name.toLowerCase() === name.toLowerCase());
-        if (profile === undefined) {
-          profile = { id: `profile-${Date.now()}`, name, config: { ...draftConfig } };
-          demoProfiles.push(profile);
-        } else {
-          profile.name = name;
-          profile.config = { ...draftConfig };
-        }
-        activeProfileId = profile.id;
+        demoProfiles[0].config = { ...draftConfig };
+        activeProfileId = defaultProfileId;
         updateDemoState({ revision: state.revision + 1 });
         dispatch({ type: 'StringConfigChanged', state });
       } else if (request.action === 'reset') {
@@ -680,6 +675,542 @@
     return normalized.join('/');
   }
 
+  function parseCompleteRoleOrder(value) {
+    const parsed = String(value ?? '').trim().toUpperCase()
+      .split(/[\s,，/|>＞、;；]+/u)
+      .filter((part) => roles.includes(part));
+    const order = [];
+    const seen = new Set();
+    for (const role of [...parsed, ...roles]) {
+      if (seen.has(role))
+        continue;
+      seen.add(role);
+      order.push(role);
+    }
+    return order;
+  }
+
+  function moveOrderItem(order, fromIndex, toIndex) {
+    if (fromIndex === toIndex || fromIndex < 0 || toIndex < 0 ||
+      fromIndex >= order.length || toIndex >= order.length) {
+      return false;
+    }
+    const [item] = order.splice(fromIndex, 1);
+    order.splice(toIndex, 0, item);
+    return true;
+  }
+
+  function createOrderSeparator() {
+    const separator = document.createElement('span');
+    separator.className = 'order-separator';
+    separator.textContent = '›';
+    separator.setAttribute('aria-hidden', 'true');
+    return separator;
+  }
+
+  function createOrderChip(value, index, attribute, className = '', label = value) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = `order-chip ${className}`.trim();
+    button.dataset[attribute] = value;
+    button.textContent = label;
+    button.draggable = !encounterState.locked;
+    button.disabled = encounterState.locked;
+    button.title = '拖动调整顺序；也可以用左右方向键移动';
+    button.setAttribute('aria-label', `${label}，当前第 ${index + 1} 位`);
+    return button;
+  }
+
+  function parsePriorityEditorState(value, previousState) {
+    const completeOrder = parseCompleteRoleOrder(value);
+    const groups = [];
+    const seenGroups = new Set();
+    const roleOrders = Object.fromEntries(Object.keys(priorityGroupRoles)
+      .map((group) => [group, []]));
+    for (const role of completeOrder) {
+      const group = priorityRoleGroups[role];
+      if (!seenGroups.has(group)) {
+        seenGroups.add(group);
+        groups.push(group);
+      }
+      roleOrders[group].push(role);
+    }
+    for (const group of priorityGroupOrder) {
+      if (!seenGroups.has(group))
+        groups.push(group);
+      for (const role of priorityGroupRoles[group]) {
+        if (!roleOrders[group].includes(role))
+          roleOrders[group].push(role);
+      }
+    }
+    return {
+      groups,
+      roleOrders,
+      selectedGroup: groups.includes(previousState?.selectedGroup)
+        ? previousState.selectedGroup
+        : undefined,
+    };
+  }
+
+  function serializePriorityEditorState(state) {
+    return state.groups.flatMap((group) => state.roleOrders[group]).join('/');
+  }
+
+  function renderGroupTrack(track, state, attribute) {
+    const children = [];
+    for (const [index, group] of state.groups.entries()) {
+      const chip = createOrderChip(
+        group,
+        index,
+        attribute,
+        `group-${group.toLowerCase()}`,
+        priorityGroupLabels[group],
+      );
+      chip.classList.toggle('selected', state.selectedGroup === group);
+      chip.setAttribute('aria-expanded', String(state.selectedGroup === group));
+      children.push(chip);
+      if (index < state.groups.length - 1)
+        children.push(createOrderSeparator());
+    }
+    track.replaceChildren(...children);
+  }
+
+  function renderRoleDetail(detail, state, roleAttribute) {
+    detail.hidden = state.selectedGroup === undefined;
+    if (state.selectedGroup === undefined) {
+      detail.replaceChildren();
+      return;
+    }
+    const label = document.createElement('span');
+    label.className = 'priority-detail-label';
+    label.textContent = `${priorityGroupLabels[state.selectedGroup]} 组内`;
+    const roleTrack = document.createElement('div');
+    roleTrack.className = 'priority-role-track';
+    const roleChildren = [];
+    for (const [index, role] of state.roleOrders[state.selectedGroup].entries()) {
+      roleChildren.push(createOrderChip(
+        role,
+        index,
+        roleAttribute,
+        `role-${state.selectedGroup.toLowerCase()}`,
+      ));
+      if (index < state.roleOrders[state.selectedGroup].length - 1)
+        roleChildren.push(createOrderSeparator());
+    }
+    roleTrack.replaceChildren(...roleChildren);
+    detail.replaceChildren(label, roleTrack);
+  }
+
+  function renderRoleOrderEditor(editor, value) {
+    const input = editor.querySelector('[data-config-key]');
+    const previousState = roleOrderEditorStates.get(editor);
+    const state = value === undefined && previousState !== undefined
+      ? previousState
+      : parsePriorityEditorState(value ?? input.value, previousState);
+    roleOrderEditorStates.set(editor, state);
+    input.value = serializePriorityEditorState(state);
+    renderGroupTrack(editor.querySelector('.role-order-track'), state, 'orderGroup');
+    renderRoleDetail(editor.querySelector('.role-order-detail'), state, 'orderRole');
+  }
+
+  function commitRoleOrderEditor(editor, focusSelector) {
+    const state = roleOrderEditorStates.get(editor);
+    const input = editor.querySelector('[data-config-key]');
+    input.value = serializePriorityEditorState(state);
+    renderRoleOrderEditor(editor);
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+    if (focusSelector !== undefined)
+      editor.querySelector(focusSelector)?.focus();
+  }
+
+  function setupRoleOrderEditor(editor) {
+    editor.addEventListener('click', (event) => {
+      const groupChip = event.target.closest?.('[data-order-group]') ?? null;
+      if (groupChip === null || groupChip.disabled)
+        return;
+      const state = roleOrderEditorStates.get(editor);
+      const group = groupChip.dataset.orderGroup;
+      state.selectedGroup = state.selectedGroup === group ? undefined : group;
+      renderRoleOrderEditor(editor);
+      if (state.selectedGroup !== undefined)
+        editor.querySelector(`[data-order-group="${group}"]`)?.focus();
+    });
+    editor.addEventListener('dragstart', (event) => {
+      const groupChip = event.target.closest?.('[data-order-group]') ?? null;
+      const roleChip = event.target.closest?.('[data-order-role]') ?? null;
+      const chip = roleChip ?? groupChip;
+      if (chip === null || chip.disabled)
+        return;
+      priorityDragState = roleChip !== null
+        ? {
+            editor,
+            kind: 'role-order-role',
+            value: roleChip.dataset.orderRole,
+            group: priorityRoleGroups[roleChip.dataset.orderRole],
+          }
+        : {
+            editor,
+            kind: 'role-order-group',
+            value: groupChip.dataset.orderGroup,
+          };
+      chip.classList.add('dragging');
+      event.dataTransfer?.setData('text/plain', priorityDragState.value);
+      if (event.dataTransfer !== null)
+        event.dataTransfer.effectAllowed = 'move';
+    });
+    editor.addEventListener('dragover', (event) => {
+      if (priorityDragState?.editor !== editor)
+        return;
+      const groupTarget = event.target.closest?.('[data-order-group]') ?? null;
+      const roleTarget = event.target.closest?.('[data-order-role]') ?? null;
+      const validGroupTarget = priorityDragState.kind === 'role-order-group' &&
+        groupTarget !== null;
+      const validRoleTarget = priorityDragState.kind === 'role-order-role' &&
+        roleTarget !== null &&
+        priorityRoleGroups[roleTarget.dataset.orderRole] === priorityDragState.group;
+      if (validGroupTarget || validRoleTarget)
+        event.preventDefault();
+    });
+    editor.addEventListener('drop', (event) => {
+      if (priorityDragState?.editor !== editor)
+        return;
+      const state = roleOrderEditorStates.get(editor);
+      if (priorityDragState.kind === 'role-order-group') {
+        const target = event.target.closest?.('[data-order-group]') ?? null;
+        if (target === null)
+          return;
+        event.preventDefault();
+        const fromIndex = state.groups.indexOf(priorityDragState.value);
+        const toIndex = state.groups.indexOf(target.dataset.orderGroup);
+        if (moveOrderItem(state.groups, fromIndex, toIndex)) {
+          commitRoleOrderEditor(
+            editor,
+            `[data-order-group="${priorityDragState.value}"]`,
+          );
+        }
+        return;
+      }
+      const target = event.target.closest?.('[data-order-role]') ?? null;
+      if (target === null ||
+        priorityRoleGroups[target.dataset.orderRole] !== priorityDragState.group) {
+        return;
+      }
+      event.preventDefault();
+      const roleOrder = state.roleOrders[priorityDragState.group];
+      const fromIndex = roleOrder.indexOf(priorityDragState.value);
+      const toIndex = roleOrder.indexOf(target.dataset.orderRole);
+      if (moveOrderItem(roleOrder, fromIndex, toIndex)) {
+        commitRoleOrderEditor(
+          editor,
+          `[data-order-role="${priorityDragState.value}"]`,
+        );
+      }
+    });
+    editor.addEventListener('dragend', () => {
+      editor.querySelector('.dragging')?.classList.remove('dragging');
+      priorityDragState = undefined;
+    });
+    editor.addEventListener('keydown', (event) => {
+      if (!['ArrowLeft', 'ArrowRight'].includes(event.key))
+        return;
+      const state = roleOrderEditorStates.get(editor);
+      const groupChip = event.target.closest?.('[data-order-group]') ?? null;
+      const roleChip = event.target.closest?.('[data-order-role]') ?? null;
+      const direction = event.key === 'ArrowLeft' ? -1 : 1;
+      if (groupChip !== null) {
+        const fromIndex = state.groups.indexOf(groupChip.dataset.orderGroup);
+        if (!moveOrderItem(state.groups, fromIndex, fromIndex + direction))
+          return;
+        event.preventDefault();
+        commitRoleOrderEditor(
+          editor,
+          `[data-order-group="${groupChip.dataset.orderGroup}"]`,
+        );
+        return;
+      }
+      if (roleChip === null)
+        return;
+      const group = priorityRoleGroups[roleChip.dataset.orderRole];
+      const roleOrder = state.roleOrders[group];
+      const fromIndex = roleOrder.indexOf(roleChip.dataset.orderRole);
+      if (!moveOrderItem(roleOrder, fromIndex, fromIndex + direction))
+        return;
+      event.preventDefault();
+      commitRoleOrderEditor(
+        editor,
+        `[data-order-role="${roleChip.dataset.orderRole}"]`,
+      );
+    });
+  }
+
+  function renderPriorityEditor(editor, value) {
+    const input = editor.querySelector('[data-config-key]');
+    const previousState = priorityEditorStates.get(editor);
+    const state = value === undefined && previousState !== undefined
+      ? previousState
+      : parsePriorityEditorState(value ?? input.value, previousState);
+    priorityEditorStates.set(editor, state);
+    input.value = serializePriorityEditorState(state);
+    renderGroupTrack(editor.querySelector('.priority-track'), state, 'priorityGroup');
+    renderRoleDetail(editor.querySelector('.priority-detail'), state, 'priorityRole');
+  }
+
+  function commitPriorityEditor(editor, focusSelector) {
+    const state = priorityEditorStates.get(editor);
+    const input = editor.querySelector('[data-config-key]');
+    input.value = serializePriorityEditorState(state);
+    renderPriorityEditor(editor);
+    const prioritySet = editor.closest('[data-priority-set]');
+    if (prioritySet !== null)
+      renderPrioritySetMaster(prioritySet);
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+    if (focusSelector !== undefined)
+      editor.querySelector(focusSelector)?.focus();
+  }
+
+  function setupPriorityEditor(editor) {
+    editor.addEventListener('click', (event) => {
+      const groupChip = event.target.closest?.('[data-priority-group]') ?? null;
+      if (groupChip === null || groupChip.disabled)
+        return;
+      const state = priorityEditorStates.get(editor);
+      const group = groupChip.dataset.priorityGroup;
+      state.selectedGroup = state.selectedGroup === group ? undefined : group;
+      renderPriorityEditor(editor);
+      if (state.selectedGroup !== undefined)
+        editor.querySelector(`[data-priority-group="${group}"]`)?.focus();
+    });
+    editor.addEventListener('dragstart', (event) => {
+      const groupChip = event.target.closest?.('[data-priority-group]') ?? null;
+      const roleChip = event.target.closest?.('[data-priority-role]') ?? null;
+      const chip = roleChip ?? groupChip;
+      if (chip === null || chip.disabled)
+        return;
+      priorityDragState = roleChip !== null
+        ? {
+            editor,
+            kind: 'priority-role',
+            value: roleChip.dataset.priorityRole,
+            group: priorityRoleGroups[roleChip.dataset.priorityRole],
+          }
+        : {
+            editor,
+            kind: 'priority-group',
+            value: groupChip.dataset.priorityGroup,
+          };
+      chip.classList.add('dragging');
+      event.dataTransfer?.setData('text/plain', priorityDragState.value);
+      if (event.dataTransfer !== null)
+        event.dataTransfer.effectAllowed = 'move';
+    });
+    editor.addEventListener('dragover', (event) => {
+      if (priorityDragState?.editor !== editor)
+        return;
+      const groupTarget = event.target.closest?.('[data-priority-group]') ?? null;
+      const roleTarget = event.target.closest?.('[data-priority-role]') ?? null;
+      const validGroupTarget = priorityDragState.kind === 'priority-group' && groupTarget !== null;
+      const validRoleTarget = priorityDragState.kind === 'priority-role' && roleTarget !== null &&
+        priorityRoleGroups[roleTarget.dataset.priorityRole] === priorityDragState.group;
+      if (validGroupTarget || validRoleTarget)
+        event.preventDefault();
+    });
+    editor.addEventListener('drop', (event) => {
+      if (priorityDragState?.editor !== editor)
+        return;
+      const state = priorityEditorStates.get(editor);
+      if (priorityDragState.kind === 'priority-group') {
+        const target = event.target.closest?.('[data-priority-group]') ?? null;
+        if (target === null)
+          return;
+        event.preventDefault();
+        const fromIndex = state.groups.indexOf(priorityDragState.value);
+        const toIndex = state.groups.indexOf(target.dataset.priorityGroup);
+        if (moveOrderItem(state.groups, fromIndex, toIndex))
+          commitPriorityEditor(editor, `[data-priority-group="${priorityDragState.value}"]`);
+        return;
+      }
+      const target = event.target.closest?.('[data-priority-role]') ?? null;
+      if (target === null || priorityRoleGroups[target.dataset.priorityRole] !== priorityDragState.group)
+        return;
+      event.preventDefault();
+      const roleOrder = state.roleOrders[priorityDragState.group];
+      const fromIndex = roleOrder.indexOf(priorityDragState.value);
+      const toIndex = roleOrder.indexOf(target.dataset.priorityRole);
+      if (moveOrderItem(roleOrder, fromIndex, toIndex))
+        commitPriorityEditor(editor, `[data-priority-role="${priorityDragState.value}"]`);
+    });
+    editor.addEventListener('dragend', () => {
+      editor.querySelector('.dragging')?.classList.remove('dragging');
+      priorityDragState = undefined;
+    });
+    editor.addEventListener('keydown', (event) => {
+      if (!['ArrowLeft', 'ArrowRight'].includes(event.key))
+        return;
+      const state = priorityEditorStates.get(editor);
+      const groupChip = event.target.closest?.('[data-priority-group]') ?? null;
+      const roleChip = event.target.closest?.('[data-priority-role]') ?? null;
+      const direction = event.key === 'ArrowLeft' ? -1 : 1;
+      if (groupChip !== null) {
+        const fromIndex = state.groups.indexOf(groupChip.dataset.priorityGroup);
+        if (!moveOrderItem(state.groups, fromIndex, fromIndex + direction))
+          return;
+        event.preventDefault();
+        commitPriorityEditor(editor, `[data-priority-group="${groupChip.dataset.priorityGroup}"]`);
+        return;
+      }
+      if (roleChip === null)
+        return;
+      const group = priorityRoleGroups[roleChip.dataset.priorityRole];
+      const roleOrder = state.roleOrders[group];
+      const fromIndex = roleOrder.indexOf(roleChip.dataset.priorityRole);
+      if (!moveOrderItem(roleOrder, fromIndex, fromIndex + direction))
+        return;
+      event.preventDefault();
+      commitPriorityEditor(editor, `[data-priority-role="${roleChip.dataset.priorityRole}"]`);
+    });
+  }
+
+  function renderPrioritySetMaster(prioritySet) {
+    const editors = [...prioritySet.querySelectorAll('[data-priority-editor]')];
+    const states = editors.map((editor) => priorityEditorStates.get(editor))
+      .filter((state) => state !== undefined);
+    if (states.length === 0)
+      return;
+    const groups = states[0].groups;
+    const allSynchronized = states.length === editors.length &&
+      states.every((state) => state.groups.join('/') === groups.join('/'));
+    const masterState = {
+      groups,
+      selectedGroup: undefined,
+    };
+    renderGroupTrack(
+      prioritySet.querySelector('.priority-master-track'),
+      masterState,
+      'priorityMasterGroup',
+    );
+    const status = prioritySet.querySelector('.priority-master-status');
+    status.textContent = allSynchronized ? '同步三个目标' : '已有细分';
+    status.classList.toggle('is-detailed', !allSynchronized);
+  }
+
+  function commitPrioritySetGroups(prioritySet, groups, focusGroup) {
+    const editors = [...prioritySet.querySelectorAll('[data-priority-editor]')];
+    let changeInput;
+    for (const editor of editors) {
+      const state = priorityEditorStates.get(editor);
+      if (state === undefined)
+        continue;
+      state.groups = [...groups];
+      const input = editor.querySelector('[data-config-key]');
+      input.value = serializePriorityEditorState(state);
+      renderPriorityEditor(editor);
+      changeInput ??= input;
+    }
+    renderPrioritySetMaster(prioritySet);
+    changeInput?.dispatchEvent(new Event('change', { bubbles: true }));
+    if (focusGroup !== undefined) {
+      prioritySet
+        .querySelector(`[data-priority-master-group="${focusGroup}"]`)
+        ?.focus();
+    }
+  }
+
+  function setupPrioritySet(prioritySet) {
+    const details = prioritySet.querySelector('.priority-target-details');
+    const toggle = prioritySet.querySelector('.priority-details-toggle');
+    toggle.addEventListener('click', () => {
+      details.hidden = !details.hidden;
+      const expanded = !details.hidden;
+      toggle.setAttribute('aria-expanded', String(expanded));
+      toggle.textContent = expanded ? '收起' : '细分';
+      prioritySet.classList.toggle('details-open', expanded);
+    });
+    prioritySet.addEventListener('dragstart', (event) => {
+      const chip = event.target.closest?.('[data-priority-master-group]') ?? null;
+      if (chip === null || chip.disabled)
+        return;
+      priorityDragState = {
+        editor: prioritySet,
+        kind: 'priority-master-group',
+        value: chip.dataset.priorityMasterGroup,
+      };
+      chip.classList.add('dragging');
+      event.dataTransfer?.setData('text/plain', priorityDragState.value);
+      if (event.dataTransfer !== null)
+        event.dataTransfer.effectAllowed = 'move';
+    });
+    prioritySet.addEventListener('dragover', (event) => {
+      if (priorityDragState?.editor !== prioritySet ||
+        priorityDragState.kind !== 'priority-master-group') {
+        return;
+      }
+      const target = event.target.closest?.('[data-priority-master-group]') ?? null;
+      if (target !== null)
+        event.preventDefault();
+    });
+    prioritySet.addEventListener('drop', (event) => {
+      if (priorityDragState?.editor !== prioritySet ||
+        priorityDragState.kind !== 'priority-master-group') {
+        return;
+      }
+      const target = event.target.closest?.('[data-priority-master-group]') ?? null;
+      if (target === null)
+        return;
+      const firstEditor = prioritySet.querySelector('[data-priority-editor]');
+      const firstState = priorityEditorStates.get(firstEditor);
+      if (firstState === undefined)
+        return;
+      const groups = [...firstState.groups];
+      const fromIndex = groups.indexOf(priorityDragState.value);
+      const toIndex = groups.indexOf(target.dataset.priorityMasterGroup);
+      if (!moveOrderItem(groups, fromIndex, toIndex))
+        return;
+      event.preventDefault();
+      commitPrioritySetGroups(prioritySet, groups, priorityDragState.value);
+    });
+    prioritySet.addEventListener('dragend', () => {
+      prioritySet.querySelector('.dragging')?.classList.remove('dragging');
+      priorityDragState = undefined;
+    });
+    prioritySet.addEventListener('keydown', (event) => {
+      if (!['ArrowLeft', 'ArrowRight'].includes(event.key))
+        return;
+      const chip = event.target.closest?.('[data-priority-master-group]') ?? null;
+      if (chip === null)
+        return;
+      const firstEditor = prioritySet.querySelector('[data-priority-editor]');
+      const firstState = priorityEditorStates.get(firstEditor);
+      if (firstState === undefined)
+        return;
+      const groups = [...firstState.groups];
+      const fromIndex = groups.indexOf(chip.dataset.priorityMasterGroup);
+      const direction = event.key === 'ArrowLeft' ? -1 : 1;
+      if (!moveOrderItem(groups, fromIndex, fromIndex + direction))
+        return;
+      event.preventDefault();
+      commitPrioritySetGroups(prioritySet, groups, chip.dataset.priorityMasterGroup);
+    });
+  }
+
+  function syncOrderEditors(values) {
+    for (const editor of roleOrderEditors)
+      renderRoleOrderEditor(editor, values?.[editor.dataset.roleOrderEditor]);
+    for (const editor of priorityEditors)
+      renderPriorityEditor(editor, values?.[editor.dataset.priorityEditor]);
+    for (const prioritySet of prioritySets)
+      renderPrioritySetMaster(prioritySet);
+  }
+
+  function setOrderEditorsDisabled(disabled) {
+    for (const editor of [...roleOrderEditors, ...priorityEditors, ...prioritySets]) {
+      editor.classList.toggle('disabled', disabled);
+      for (const button of editor.querySelectorAll('button')) {
+        button.disabled = disabled;
+        button.draggable = !disabled;
+      }
+    }
+  }
+
   function normalizeLocalConfigForSave(input, fallback = safeEncounterConfig) {
     const normalized = normalizeLocalConfig(input, fallback);
     for (const key of completeRoleOrderConfigKeys)
@@ -700,11 +1231,15 @@
 
   function createDefaultLocalConfigStore() {
     return {
-      version: 2,
+      version: 3,
       revision: 0,
-      activeProfileId: 'default',
+      activeProfileId: defaultProfileId,
       pendingBridgeSync: false,
-      profiles: [{ id: 'default', name: '默认配置', config: { ...safeEncounterConfig } }],
+      profiles: [{
+        id: defaultProfileId,
+        name: defaultProfileName,
+        config: { ...safeEncounterConfig },
+      }],
     };
   }
 
@@ -716,7 +1251,7 @@
     const profiles = [];
     const ids = new Set();
     const names = new Set();
-    let migrated = saved.version !== 2;
+    let migrated = saved.version !== 3;
     for (const item of Array.isArray(saved.profiles) ? saved.profiles.slice(0, 20) : []) {
       const id = typeof item?.id === 'string' ? item.id.trim() : '';
       let name;
@@ -749,13 +1284,25 @@
     if (profiles.length === 0)
       return createDefaultLocalConfigStore();
 
-    const activeProfileId = profiles.some((profile) => profile.id === saved.activeProfileId)
-      ? saved.activeProfileId
-      : profiles[0].id;
+    const previouslyActiveProfile = profiles.find((profile) => profile.id === saved.activeProfileId) ??
+      profiles[0];
+    let defaultProfile = profiles.find((profile) => profile.id === defaultProfileId);
+    if (defaultProfile === undefined) {
+      defaultProfile = {
+        id: defaultProfileId,
+        name: defaultProfileName,
+        config: { ...previouslyActiveProfile.config },
+      };
+      profiles.unshift(defaultProfile);
+      migrated = true;
+    } else if (defaultProfile.name !== defaultProfileName) {
+      defaultProfile.name = defaultProfileName;
+      migrated = true;
+    }
     const store = {
-      version: 2,
+      version: 3,
       revision: Number.isSafeInteger(saved.revision) && saved.revision >= 0 ? saved.revision : 0,
-      activeProfileId,
+      activeProfileId: defaultProfileId,
       pendingBridgeSync: saved.pendingBridgeSync === true || migrated,
       profiles,
     };
@@ -770,7 +1317,7 @@
   }
 
   function getLocalActiveProfile(store = localConfigStore) {
-    return store.profiles.find((profile) => profile.id === store.activeProfileId) ?? store.profiles[0];
+    return store.profiles.find((profile) => profile.id === defaultProfileId) ?? store.profiles[0];
   }
 
   function persistLocalConfigStore() {
@@ -795,50 +1342,6 @@
     return profile.config;
   }
 
-  function selectLocalConfigProfile(profileId) {
-    const profile = localConfigStore.profiles.find((item) => item.id === profileId);
-    if (profile === undefined)
-      throw new Error('本地配置档案不存在');
-    localConfigStore.activeProfileId = profile.id;
-    localConfigStore.pendingBridgeSync = true;
-    touchLocalConfig();
-    persistLocalConfigStore();
-    updateEncounterFromLocal(true);
-  }
-
-  function saveLocalConfigProfile(name, config) {
-    const normalizedName = normalizeLocalProfileName(name);
-    const sourceConfig = { ...getLocalActiveProfile().config, ...config };
-    let profile = localConfigStore.profiles.find((item) =>
-      item.name.localeCompare(normalizedName, 'zh-CN', { sensitivity: 'accent' }) === 0);
-    if (profile === undefined) {
-      if (localConfigStore.profiles.length >= 20)
-        throw new Error('配置档案最多保存 20 个');
-      profile = {
-        id: `local-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`,
-        name: normalizedName,
-        config: { ...safeEncounterConfig },
-      };
-      localConfigStore.profiles.push(profile);
-    }
-    profile.name = normalizedName;
-    profile.config = normalizeLocalConfigForSave(sourceConfig, getLocalActiveProfile().config);
-    localConfigStore.activeProfileId = profile.id;
-    localConfigStore.pendingBridgeSync = true;
-    touchLocalConfig();
-    persistLocalConfigStore();
-    updateEncounterFromLocal(true);
-  }
-
-  function resetLocalConfigProfile() {
-    const profile = getLocalActiveProfile();
-    profile.config = { ...safeEncounterConfig };
-    localConfigStore.pendingBridgeSync = true;
-    touchLocalConfig();
-    persistLocalConfigStore();
-    updateEncounterFromLocal(true);
-  }
-
   function updateEncounterFromLocal(syncForm = false) {
     const profile = getLocalActiveProfile();
     const profiles = configBackendAvailable ? [...backendConfigProfiles] : [];
@@ -859,28 +1362,22 @@
       hasPendingChanges: encounterState.inEncounter &&
         JSON.stringify(encounterState.config) !== JSON.stringify(profile.config),
     };
-    renderProfileOptions();
     if (syncForm)
       writeConfigToForm(profile.config);
     renderConfigState();
   }
 
   function rememberBackendStateLocally(state) {
-    const activeProfileId = typeof state?.activeProfileId === 'string'
-      ? state.activeProfileId
-      : 'default';
-    const profileMeta = Array.isArray(state?.profiles)
-      ? state.profiles.find((profile) => profile.id === activeProfileId)
-      : undefined;
-    const name = typeof profileMeta?.name === 'string' && profileMeta.name.trim() !== ''
-      ? profileMeta.name.trim()
-      : '默认配置';
     const config = normalizeLocalConfig(state?.draftConfig ?? state?.config);
-    localConfigStore.profiles = localConfigStore.profiles.filter((profile) =>
-      profile.id !== activeProfileId &&
-      profile.name.localeCompare(name, 'zh-CN', { sensitivity: 'accent' }) !== 0);
-    localConfigStore.profiles.push({ id: activeProfileId, name, config });
-    localConfigStore.activeProfileId = activeProfileId;
+    let profile = localConfigStore.profiles.find((item) => item.id === defaultProfileId);
+    if (profile === undefined) {
+      profile = { id: defaultProfileId, name: defaultProfileName, config };
+      localConfigStore.profiles.unshift(profile);
+    } else {
+      profile.name = defaultProfileName;
+      profile.config = config;
+    }
+    localConfigStore.activeProfileId = defaultProfileId;
     localConfigStore.pendingBridgeSync = false;
     touchLocalConfig();
     persistLocalConfigStore();
@@ -1191,7 +1688,6 @@
     pointerDragState = undefined;
     for (const slot of roleSlots.querySelectorAll('.role-slot'))
       slot.classList.remove('dragging', 'drag-over');
-    scheduleCompactMode();
   }
 
   function defaultSort() {
@@ -1235,10 +1731,44 @@
     pendingBroadcastTimer = setTimeout(broadcast, 120);
   }
 
+  function normalizeArrReplayParty(rawParty, requireFullParty) {
+    if (!Array.isArray(rawParty) || rawParty.length > 8)
+      return;
+    const members = rawParty
+      .map(normalizeMember)
+      .filter((member) => member.inParty && member.name !== '' && getJobGroup(member.job) !== undefined);
+    if (members.length !== rawParty.length || requireFullParty && members.length !== 8)
+      return;
+    const ids = members.map((member) => `${member.id}`.trim().toUpperCase().replace(/^0X/u, ''));
+    const names = members.map((member) => member.name);
+    if (ids.some((id) => !/^1[0-9A-F]{7}$/u.test(id)) ||
+        new Set(ids).size !== ids.length || new Set(names).size !== names.length)
+      return;
+    if (requireFullParty) {
+      const groups = members.map((member) => getJobGroup(member.job));
+      if (groups.filter((group) => group === 'tank').length !== 2 ||
+          groups.filter((group) => group === 'healer').length !== 2 ||
+          groups.filter((group) => group === 'dps').length !== 4)
+        return;
+    }
+    return members.map((member, index) => ({ ...member, id: ids[index] }));
+  }
+
   function handleBroadcastMessage(message) {
     const text = message?.msg?.text;
-    if ((message?.source === 'stringUserJS' || message?.source === 'soumaUserJS') && text === 'requestData')
+    if ((message?.source === 'stringUserJS' || message?.source === 'soumaUserJS') &&
+        text === 'requestData') {
       broadcast();
+      return;
+    }
+    if (message?.source !== 'stringUserJS' || message?.msg?.type !== 'arrReplayParty' ||
+        typeof message.msg.active !== 'boolean')
+      return;
+    const nextParty = normalizeArrReplayParty(message.msg.party, message.msg.active);
+    if (nextParty === undefined)
+      return;
+    arrReplayPartyActive = message.msg.active;
+    setParty(nextParty);
   }
 
   function handlePrimaryPlayer(event) {
@@ -1287,7 +1817,7 @@
   }
 
   function currentLayoutMode() {
-    return compactMode ? 'compact' : activeView;
+    return activeView === 'config' ? 'config' : 'compact';
   }
 
   function measureOverlayLayout() {
@@ -1425,39 +1955,13 @@
   }
 
   function renderActiveView(resetFallback = false) {
-    const renderedView = compactMode ? 'roles' : activeView;
-    appShell.dataset.compact = compactMode ? 'true' : 'false';
-    appShell.dataset.view = renderedView;
-    rolesPanel.hidden = renderedView !== 'roles';
-    configPanel.hidden = renderedView !== 'config';
+    appShell.dataset.view = activeView;
+    rolesPanel.hidden = activeView !== 'roles';
+    configPanel.hidden = activeView !== 'config';
     rolesTab.classList.toggle('active', activeView === 'roles');
     configTab.classList.toggle('active', activeView === 'config');
     viewTitle.textContent = activeView === 'config' ? '本次设置' : '职能分配';
     scheduleOverlayResize(resetFallback);
-  }
-
-  function setCompactMode(compact) {
-    const nextCompactMode = Boolean(compact);
-    if (compactMode === nextCompactMode)
-      return;
-    compactMode = nextCompactMode;
-    if (compactMode && appShell.contains(document.activeElement))
-      document.activeElement.blur();
-    renderActiveView(true);
-  }
-
-  function scheduleCompactMode() {
-    clearTimeout(compactTimer);
-    if (pointerInside || pointerDragState !== undefined)
-      return;
-    compactTimer = window.setTimeout(() => {
-      if (pointerInside || pointerDragState !== undefined)
-        return;
-      if (selectInteraction !== undefined)
-        closeCustomSelect(selectInteraction);
-      if (!pointerInside && pointerDragState === undefined && selectInteraction === undefined)
-        setCompactMode(true);
-    }, 180);
   }
 
   function endSelectInteraction(select) {
@@ -1469,7 +1973,6 @@
 
   function beginSelectInteraction(select) {
     selectInteraction = select;
-    clearTimeout(compactTimer);
     clearTimeout(selectInteractionTimer);
     selectInteractionTimer = window.setTimeout(() => closeCustomSelect(select), 30000);
   }
@@ -1549,7 +2052,6 @@
     if (restoreFocus && !state.trigger.disabled)
       state.trigger.focus({ preventScroll: true });
     scheduleOverlayResize(true);
-    scheduleCompactMode();
   }
 
   function openCustomSelect(select) {
@@ -1692,7 +2194,8 @@
         control.value = value;
     }
     syncP2EightTowerPreset(values);
-    syncCustomSelects([...configControls, p2EightTowerPreset, configProfileSelect].filter(Boolean));
+    syncOrderEditors(values);
+    syncCustomSelects([...configControls, p2EightTowerPreset].filter(Boolean));
     configFormInitialized = true;
     configDirty = false;
   }
@@ -1757,34 +2260,8 @@
     scheduleDraftSave();
   }
 
-  function getVisibleConfigProfiles() {
-    const profiles = configBackendAvailable ? [...backendConfigProfiles] : [];
-    for (const localProfile of localConfigStore.profiles) {
-      const existingIndex = profiles.findIndex((profile) => profile.id === localProfile.id);
-      const metadata = { id: localProfile.id, name: localProfile.name };
-      if (existingIndex === -1)
-        profiles.push(metadata);
-      else
-        profiles[existingIndex] = metadata;
-    }
-    return profiles;
-  }
-
   function getActiveProfile() {
-    return getVisibleConfigProfiles().find((profile) => profile.id === encounterState.activeProfileId) ??
-      getLocalActiveProfile();
-  }
-
-  function renderProfileOptions() {
-    const selectedId = encounterState.activeProfileId;
-    configProfileSelect.replaceChildren(...getVisibleConfigProfiles().map((profile) => {
-      const option = document.createElement('option');
-      option.value = profile.id;
-      option.textContent = profile.name;
-      option.selected = profile.id === selectedId;
-      return option;
-    }));
-    syncCustomSelect(configProfileSelect);
+    return getLocalActiveProfile();
   }
 
   function isCombatDisableEnabled(key) {
@@ -1812,12 +2289,9 @@
     }
     if (p2EightTowerPreset !== null)
       p2EightTowerPreset.disabled = !editable;
-    configProfileSelect.disabled = !editable;
-    profileNameInput.disabled = !editable;
-    saveProfileButton.disabled = !editable || profileNameInput.value.trim() === '';
-    restoreDefaultsButton.disabled = !editable;
+    setOrderEditorsDisabled(!editable);
     applyConfigButton.disabled = !editable;
-    syncCustomSelects([...configControls, p2EightTowerPreset, configProfileSelect].filter(Boolean));
+    syncCustomSelects([...configControls, p2EightTowerPreset].filter(Boolean));
     applyConfigButton.textContent = configBackendAvailable && encounterState.inEncounter
       ? '保存并生效'
       : '保存设置';
@@ -1829,10 +2303,6 @@
           : hasPendingBridgeSync
             ? '已保存，等待同步到 ACT'
             : configBackendAvailable ? '修改会自动保存' : '保存在此浏览器';
-    activeProfileStatus.textContent = activeProfile === undefined
-      ? '尚无配置档案'
-      : `当前：${activeProfile.name}`;
-
     configTabDot.className = 'tab-dot';
     if (encounterState.inEncounter)
       configTabDot.classList.add(hasPendingChanges ? 'pending' : 'applied');
@@ -1954,7 +2424,6 @@
       profiles: Array.isArray(state.profiles) ? state.profiles : encounterState.profiles,
       safeDefaults,
     };
-    renderProfileOptions();
     if (syncForm || !configFormInitialized)
       writeConfigToForm(encounterState.draftConfig);
     renderConfigState();
@@ -2401,67 +2870,6 @@
     await configSavePromise;
   }
 
-  async function selectConfigProfile() {
-    const profileId = configProfileSelect.value;
-    try {
-      await flushDraftSave();
-      if (!configBackendAvailable) {
-        selectLocalConfigProfile(profileId);
-        configError.textContent = '';
-        return;
-      }
-      await enqueueConfigMutation(async () => {
-        if (!backendConfigProfiles.some((profile) => profile.id === profileId)) {
-          selectLocalConfigProfile(profileId);
-          await syncPendingLocalConfigToBridgeRaw();
-          return;
-        }
-        let result = await callStringConfig('selectProfile', { profileId });
-        result = await settleBridgeDraftRaw(result);
-        await resolveBridgeResultRaw(result, true);
-      });
-      configError.textContent = '';
-    } catch (error) {
-      configError.textContent = localConfigStore.pendingBridgeSync
-        ? `设置已保存在悬浮窗；同步到 ACT 失败：${error?.message ?? String(error)}`
-        : error?.message ?? String(error);
-      renderConfigState();
-    }
-  }
-
-  async function saveCurrentProfile() {
-    const name = profileNameInput.value.trim();
-    if (name === '')
-      return;
-    try {
-      await flushDraftSave();
-      saveLocalConfigProfile(name, readConfigFromForm());
-      profileNameInput.value = '';
-      if (configBackendAvailable)
-        await syncPendingLocalConfigToBridge();
-      configError.textContent = '';
-    } catch (error) {
-      configError.textContent = `设置已保存在悬浮窗；同步到 ACT 失败：${error?.message ?? String(error)}`;
-      renderConfigState();
-    }
-  }
-
-  async function restoreDefaults() {
-    try {
-      await flushDraftSave();
-      resetLocalConfigProfile();
-      if (!configBackendAvailable) {
-        configError.textContent = '';
-        return;
-      }
-      await syncPendingLocalConfigToBridge();
-      configError.textContent = '';
-    } catch (error) {
-      configError.textContent = `设置已保存在悬浮窗；同步到 ACT 失败：${error?.message ?? String(error)}`;
-      renderConfigState();
-    }
-  }
-
   async function applyEncounterConfig() {
     if (encounterState.locked)
       return;
@@ -2489,18 +2897,14 @@
     defaultSortButton.addEventListener('click', defaultSort);
     rolesTab.addEventListener('click', () => setView('roles'));
     configTab.addEventListener('click', () => setView('config'));
-    configProfileSelect.addEventListener('change', selectConfigProfile);
-    profileNameInput.addEventListener('input', renderConfigState);
-    profileNameInput.addEventListener('keydown', (event) => {
-      if (event.key !== 'Enter')
-        return;
-      event.preventDefault();
-      saveCurrentProfile();
-    });
-    saveProfileButton.addEventListener('click', saveCurrentProfile);
-    restoreDefaultsButton.addEventListener('click', restoreDefaults);
     applyConfigButton.addEventListener('click', applyEncounterConfig);
     p2EightTowerPreset?.addEventListener('change', applyP2EightTowerPreset);
+    for (const editor of roleOrderEditors)
+      setupRoleOrderEditor(editor);
+    for (const editor of priorityEditors)
+      setupPriorityEditor(editor);
+    for (const prioritySet of prioritySets)
+      setupPrioritySet(prioritySet);
     for (const tab of phaseTabs)
       tab.addEventListener('click', () => setActivePhase(tab.dataset.phase));
     for (const control of configControls) {
@@ -2540,21 +2944,13 @@
         return;
       closeCustomSelect(activeSelect);
     }, true);
-    appShell.addEventListener('pointerenter', () => {
-      pointerInside = true;
-      clearTimeout(compactTimer);
-      setCompactMode(false);
-    });
-    appShell.addEventListener('pointerleave', () => {
-      pointerInside = false;
-      scheduleCompactMode();
-    });
-
     window.stringRuntimeDebug = {
       setParty,
       buildPayload,
       swapRoleSlots,
       defaultSort,
+      setView,
+      getActiveView: () => activeView,
       enterZone: (zoneId = dancingMadUltimateZoneId, zoneName = '妖星乱舞绝境战') =>
         handleZoneChanged({ zoneID: zoneId, zoneName }),
       setCombat: (inCombat) => handleCombatChanged({ detail: { inGameCombat: inCombat } }),
@@ -2570,18 +2966,18 @@
     };
 
     writeConfigToForm(initialLocalProfile.config);
-    renderProfileOptions();
     setActivePhase(activePhase);
     renderConfigState();
     render();
     installDemoOverlayApi();
     installOverlayApi();
-    pointerInside = appShell.matches(':hover');
-    compactMode = !pointerInside;
     renderActiveView(true);
     connectionState.textContent = '连接中';
     connectionState.className = 'state state-pending';
-    window.addOverlayListener('PartyChanged', (event) => setParty(event.party));
+    window.addOverlayListener('PartyChanged', (event) => {
+      if (!arrReplayPartyActive)
+        setParty(event.party);
+    });
     window.addOverlayListener('ChangePrimaryPlayer', handlePrimaryPlayer);
     window.addOverlayListener('BroadcastMessage', handleBroadcastMessage);
     window.addOverlayListener('StringConfigChanged', handleStringConfigChanged);
