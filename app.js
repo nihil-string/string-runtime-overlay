@@ -1539,16 +1539,12 @@
   }
 
   function swapRoleSlots(sourceRole, targetRole) {
-    if (sourceRole === targetRole)
-      return;
+    if (!canSwapRoleSlots(sourceRole, targetRole))
+      return false;
+    const sourceTop = roleSlots.querySelector(`[data-role="${sourceRole}"]`)?.getBoundingClientRect().top;
+    const targetTop = roleSlots.querySelector(`[data-role="${targetRole}"]`)?.getBoundingClientRect().top;
     const sourceMember = getMemberByRole(sourceRole);
     const targetMember = getMemberByRole(targetRole);
-    if (sourceMember === undefined)
-      return;
-    if (!isRoleCompatible(sourceMember, targetRole))
-      return;
-    if (targetMember !== undefined && !isRoleCompatible(targetMember, sourceRole))
-      return;
 
     sourceMember.rp = targetRole;
     if (targetMember !== undefined)
@@ -1556,7 +1552,38 @@
 
     saveRoles();
     render();
+    animateRoleSwap(sourceRole, targetRole, sourceTop, targetTop);
     scheduleBroadcast();
+    return true;
+  }
+
+  function canSwapRoleSlots(sourceRole, targetRole) {
+    if (sourceRole === targetRole)
+      return false;
+    const sourceMember = getMemberByRole(sourceRole);
+    const targetMember = getMemberByRole(targetRole);
+    if (sourceMember === undefined || !isRoleCompatible(sourceMember, targetRole))
+      return false;
+    return targetMember === undefined || isRoleCompatible(targetMember, sourceRole);
+  }
+
+  function animateRoleSwap(sourceRole, targetRole, sourceTop, targetTop) {
+    if (!Number.isFinite(sourceTop) || !Number.isFinite(targetTop))
+      return;
+    const animateContents = (role, startY) => {
+      const slot = roleSlots.querySelector(`[data-role="${role}"]`);
+      for (const element of [slot?.querySelector('.job-icon:not([hidden])'), slot?.querySelector('.member-cell')]) {
+        element?.animate([
+          { opacity: 0.35, transform: `translateY(${startY}px)` },
+          { opacity: 1, transform: 'translateY(0)' },
+        ], {
+          duration: 180,
+          easing: 'cubic-bezier(0.2, 0.8, 0.2, 1)',
+        });
+      }
+    };
+    animateContents(sourceRole, targetTop - sourceTop);
+    animateContents(targetRole, sourceTop - targetTop);
   }
 
   function getDuplicateRoles() {
@@ -1570,6 +1597,8 @@
   }
 
   function render() {
+    if (pointerDragState !== undefined)
+      clearPointerDrag();
     if (openCustomSelectState !== undefined &&
         openCustomSelectState.state.root.closest('#roleSlots') !== null)
       closeCustomSelect(openCustomSelectState.select);
@@ -1638,13 +1667,19 @@
     handle.addEventListener('pointerdown', (event) => {
       if (event.button !== 0 || getMemberByRole(role) === undefined)
         return;
+      clearPointerDrag();
       pointerDragState = {
         active: false,
+        clientX: event.clientX,
+        clientY: event.clientY,
+        frameToken: 0,
+        ghost: undefined,
         pointerId: event.pointerId,
         role,
         slot,
         startX: event.clientX,
         startY: event.clientY,
+        targetRole: undefined,
       };
       handle.setPointerCapture(event.pointerId);
     });
@@ -1654,40 +1689,107 @@
         return;
       const xDistance = event.clientX - pointerDragState.startX;
       const yDistance = event.clientY - pointerDragState.startY;
-      if (!pointerDragState.active && Math.hypot(xDistance, yDistance) < 8)
+      if (!pointerDragState.active && Math.hypot(xDistance, yDistance) < 4)
         return;
 
-      pointerDragState.active = true;
       event.preventDefault();
-      pointerDragState.slot.classList.add('dragging');
-      const targetSlot = document.elementFromPoint(event.clientX, event.clientY)?.closest('.role-slot');
-      for (const candidate of roleSlots.querySelectorAll('.role-slot'))
-        candidate.classList.toggle('drag-over', candidate === targetSlot && targetSlot.dataset.role !== pointerDragState.role);
+      if (!pointerDragState.active)
+        startPointerDrag(pointerDragState);
+      pointerDragState.clientX = event.clientX;
+      pointerDragState.clientY = event.clientY;
+      schedulePointerDragFrame(pointerDragState);
+      updatePointerDragTarget(pointerDragState, event.clientX, event.clientY);
     });
 
     handle.addEventListener('pointerup', (event) => {
       if (pointerDragState === undefined || pointerDragState.pointerId !== event.pointerId)
         return;
       const state = pointerDragState;
-      const targetSlot = document.elementFromPoint(event.clientX, event.clientY)?.closest('.role-slot');
+      if (state.active)
+        updatePointerDragTarget(state, event.clientX, event.clientY);
+      const targetRole = state.targetRole;
       clearPointerDrag();
       if (!state.active) {
         openMemberSelect(select);
         return;
       }
       event.preventDefault();
-      const targetRole = targetSlot?.dataset.role;
       if (targetRole !== undefined)
         swapRoleSlots(state.role, targetRole);
     });
 
     handle.addEventListener('pointercancel', clearPointerDrag);
+    handle.addEventListener('lostpointercapture', (event) => {
+      if (pointerDragState?.pointerId === event.pointerId)
+        clearPointerDrag();
+    });
+  }
+
+  function startPointerDrag(state) {
+    state.active = true;
+    state.slot.classList.add('dragging');
+    document.documentElement.classList.add('role-drag-active');
+    const ghost = document.createElement('div');
+    ghost.className = 'role-drag-ghost';
+    ghost.setAttribute('aria-hidden', 'true');
+    const sourceIcon = state.slot.querySelector('.job-icon:not([hidden])');
+    if (sourceIcon !== null)
+      ghost.append(sourceIcon.cloneNode());
+    else
+      ghost.append(document.createElement('span'));
+    const name = document.createElement('span');
+    name.textContent = state.slot.querySelector('.member-name')?.textContent ?? '';
+    ghost.append(name);
+    const slotRect = state.slot.getBoundingClientRect();
+    state.ghostWidth = Math.max(112, slotRect.width - 42);
+    state.ghostHeight = 28;
+    ghost.style.width = `${state.ghostWidth}px`;
+    state.ghost = ghost;
+    document.body.append(ghost);
+    schedulePointerDragFrame(state);
+  }
+
+  function schedulePointerDragFrame(state) {
+    if (state.frameToken !== 0)
+      return;
+    state.frameToken = window.requestAnimationFrame(() => {
+      state.frameToken = 0;
+      if (pointerDragState !== state || state.ghost === undefined)
+        return;
+      const x = Math.max(4, Math.min(state.clientX + 10, window.innerWidth - state.ghostWidth - 4));
+      const y = Math.max(4, Math.min(state.clientY - (state.ghostHeight / 2), window.innerHeight - state.ghostHeight - 4));
+      state.ghost.style.transform = `translate3d(${Math.round(x)}px, ${Math.round(y)}px, 0)`;
+    });
+  }
+
+  function updatePointerDragTarget(state, clientX, clientY) {
+    const hoveredSlot = document.elementFromPoint(clientX, clientY)?.closest('.role-slot');
+    const hoveredRole = hoveredSlot?.dataset.role;
+    const targetRole = hoveredRole !== undefined && canSwapRoleSlots(state.role, hoveredRole) ?
+      hoveredRole :
+      undefined;
+    if (state.hoveredRole === hoveredRole && state.targetRole === targetRole)
+      return;
+    state.hoveredRole = hoveredRole;
+    state.targetRole = targetRole;
+    for (const candidate of roleSlots.querySelectorAll('.role-slot')) {
+      const isHovered = candidate.dataset.role === hoveredRole && hoveredRole !== state.role;
+      candidate.classList.toggle('drag-over', isHovered && targetRole !== undefined);
+      candidate.classList.toggle('drag-invalid', isHovered && targetRole === undefined);
+    }
+    state.ghost?.classList.toggle('invalid', hoveredRole !== undefined &&
+      hoveredRole !== state.role && targetRole === undefined);
   }
 
   function clearPointerDrag() {
+    const state = pointerDragState;
     pointerDragState = undefined;
+    if (state?.frameToken)
+      window.cancelAnimationFrame(state.frameToken);
+    state?.ghost?.remove();
+    document.documentElement.classList.remove('role-drag-active');
     for (const slot of roleSlots.querySelectorAll('.role-slot'))
-      slot.classList.remove('dragging', 'drag-over');
+      slot.classList.remove('dragging', 'drag-over', 'drag-invalid');
   }
 
   function defaultSort() {
