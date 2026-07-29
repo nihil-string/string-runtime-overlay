@@ -116,7 +116,7 @@ input:focus-visible,
 }
 
 .role-board {
-  padding: 13px 12px 6px;
+  padding: 10px 12px 4px;
 }
 
 .role-slots {
@@ -129,15 +129,15 @@ input:focus-visible,
   grid-template-columns: 42px 30px minmax(0, 1fr);
   align-items: center;
   gap: 10px;
-  min-height: 67px;
+  min-height: 46px;
   padding: 0 7px 0 4px;
   border-radius: 7px;
   transition: background-color 140ms ease, opacity 140ms ease;
 }
 
 .role-slot[data-group-start="true"] {
-  margin-top: 9px;
-  padding-top: 9px;
+  margin-top: 6px;
+  padding-top: 6px;
   border-top: 1px solid var(--line);
   border-radius: 0 0 7px 7px;
 }
@@ -269,8 +269,8 @@ input:focus-visible,
   align-items: center;
   justify-content: flex-end;
   gap: 8px;
-  min-height: 64px;
-  padding: 8px 12px 10px;
+  min-height: 54px;
+  padding: 6px 12px 7px;
   border-top: 1px solid var(--line);
 }
 

@@ -2987,6 +2987,7 @@
       connectionState.textContent = '已连接';
       connectionState.className = 'state state-live';
       render();
+      scheduleOverlayResize(true);
       window.callOverlayHandler({
         call: 'broadcast',
         source: 'stringRuntimeJS',
