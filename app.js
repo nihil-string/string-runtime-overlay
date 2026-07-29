@@ -1817,7 +1817,7 @@
   }
 
   function currentLayoutMode() {
-    return activeView === 'config' ? 'config' : 'compact';
+    return activeView === 'config' ? 'config' : 'roles';
   }
 
   function measureOverlayLayout() {
