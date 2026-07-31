@@ -219,32 +219,11 @@ input:focus-visible,
 }
 
 .member-cell {
-  position: relative;
   min-width: 0;
-}
-
-.member-cell::after {
-  content: "";
-  position: absolute;
-  top: 50%;
-  right: 0;
-  width: 13px;
-  height: 13px;
-  background: url("./assets/icons/chevron-down.svg") center / contain no-repeat;
-  opacity: 0;
-  pointer-events: none;
-  transform: translateY(-50%);
-  transition: opacity 120ms ease;
-}
-
-.role-slot:hover .member-cell::after,
-.role-slot:focus-within .member-cell::after {
-  opacity: 0.4;
 }
 
 .member-name {
   overflow: hidden;
-  padding-right: 16px;
   color: var(--text);
   cursor: grab;
   font-size: 13px;
@@ -253,6 +232,10 @@ input:focus-visible,
   text-overflow: ellipsis;
   touch-action: none;
   white-space: nowrap;
+}
+
+.role-slots.locked .member-name {
+  cursor: not-allowed;
 }
 
 .role-slot:active .member-name {
@@ -507,31 +490,6 @@ html.role-drag-active * {
   color: var(--faint);
   cursor: default;
   opacity: 0.56;
-}
-
-.member-combobox {
-  position: absolute;
-  z-index: 70;
-  top: calc(100% + 8px);
-  right: 0;
-  display: none;
-  width: 224px;
-}
-
-.member-combobox[data-open="true"] {
-  display: grid;
-}
-
-.member-combobox .string-combobox-trigger {
-  display: none;
-}
-
-.member-combobox .string-combobox-options {
-  position: static;
-}
-
-.member-combobox .string-combobox-option {
-  white-space: nowrap;
 }
 
 /* Settings-only view */

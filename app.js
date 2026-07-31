@@ -1,13 +1,137 @@
-(() => {
+const StringRolePriority = (() => {
   'use strict';
 
-  const roles = ['MT', 'ST', 'H1', 'H2', 'D1', 'D2', 'D3', 'D4'];
-  const groupStarts = new Set(['MT', 'H1', 'D1']);
-  const roleGroups = {
-    tank: ['MT', 'ST'],
-    healer: ['H1', 'H2'],
-    dps: ['D1', 'D2', 'D3', 'D4'],
+  const roles = Object.freeze(['MT', 'ST', 'H1', 'H2', 'D1', 'D2', 'D3', 'D4']);
+  const roleGroups = Object.freeze({
+    tank: Object.freeze(['MT', 'ST']),
+    healer: Object.freeze(['H1', 'H2']),
+    dps: Object.freeze(['D1', 'D2', 'D3', 'D4']),
+  });
+  const tankJobPriority = Object.freeze([21, 32, 37, 19, 3, 1]);
+  const healerJobPriority = Object.freeze([24, 33, 40, 28, 6]);
+  const meleeJobPriority = Object.freeze([34, 20, 39, 22, 41, 30, 2, 4, 29]);
+  const physicalRangedJobPriority = Object.freeze([31, 23, 38, 5]);
+  const casterJobPriority = Object.freeze([42, 27, 35, 25, 36, 7, 26]);
+  const tankJobs = Object.freeze([...tankJobPriority]);
+  const healerJobs = Object.freeze([...healerJobPriority]);
+  const dpsJobs = Object.freeze([
+    ...meleeJobPriority,
+    ...physicalRangedJobPriority,
+    ...casterJobPriority,
+  ]);
+  const meleeJobs = new Set(meleeJobPriority);
+  const physicalRangedJobs = new Set(physicalRangedJobPriority);
+  const casterJobs = new Set(casterJobPriority);
+
+  const getJobGroup = (job) => {
+    const jobId = Number(job);
+    if (tankJobs.includes(jobId))
+      return 'tank';
+    if (healerJobs.includes(jobId))
+      return 'healer';
+    if (dpsJobs.includes(jobId))
+      return 'dps';
   };
+
+  const sortByJobPriority = (members, priority) => {
+    const scoreByJob = new Map(priority.map((job, index) => [job, index]));
+    return members
+      .map((member, index) => ({ member, index }))
+      .sort((left, right) => {
+        const leftScore = scoreByJob.get(Number(left.member.job)) ?? 999;
+        const rightScore = scoreByJob.get(Number(right.member.job)) ?? 999;
+        return leftScore - rightScore || left.index - right.index;
+      })
+      .map(({ member }) => member);
+  };
+
+  const assignPreferredRoles = (members, preferredRoles, priority, occupiedMembers = members) => {
+    const sorted = sortByJobPriority(members, priority);
+    for (const role of preferredRoles) {
+      if (occupiedMembers.some((member) => member.rp === role))
+        continue;
+      const member = sorted.find((candidate) => candidate.rp === undefined);
+      if (member !== undefined)
+        member.rp = role;
+    }
+  };
+
+  const assignDefaultRoles = (members) => {
+    for (const member of members)
+      member.rp = undefined;
+
+    const tanks = members.filter((member) => getJobGroup(member.job) === 'tank');
+    const healers = members.filter((member) => getJobGroup(member.job) === 'healer');
+    const dps = members.filter((member) => getJobGroup(member.job) === 'dps');
+    assignPreferredRoles(tanks, roleGroups.tank, tankJobPriority);
+    assignPreferredRoles(healers, roleGroups.healer, healerJobPriority);
+
+    const casterCount = dps.filter((member) => casterJobs.has(Number(member.job))).length;
+    if (casterCount >= 2) {
+      // 双法系时让黑魔固定进入 D1/D2；D2 可为常规近战保留 D1。
+      const blackMage = dps.find((member) => Number(member.job) === 25);
+      if (blackMage !== undefined)
+        blackMage.rp = 'D2';
+    }
+
+    assignPreferredRoles(
+      dps.filter((member) => meleeJobs.has(Number(member.job))),
+      ['D1', 'D2'],
+      meleeJobPriority,
+      dps,
+    );
+    assignPreferredRoles(
+      dps.filter((member) => physicalRangedJobs.has(Number(member.job))),
+      ['D3'],
+      physicalRangedJobPriority,
+      dps,
+    );
+    assignPreferredRoles(
+      dps.filter((member) => casterJobs.has(Number(member.job))),
+      ['D4'],
+      casterJobPriority,
+      dps,
+    );
+    assignPreferredRoles(dps, roleGroups.dps, [
+      ...meleeJobPriority,
+      ...physicalRangedJobPriority,
+      ...casterJobPriority,
+    ]);
+  };
+
+  return Object.freeze({
+    assignDefaultRoles,
+    casterJobPriority,
+    dpsJobs,
+    getJobGroup,
+    healerJobPriority,
+    healerJobs,
+    meleeJobPriority,
+    physicalRangedJobPriority,
+    roleGroups,
+    roles,
+    tankJobPriority,
+    tankJobs,
+  });
+})();
+
+if (typeof module === 'object' && module.exports !== undefined)
+  module.exports = StringRolePriority;
+
+if (typeof window !== 'undefined' && typeof document !== 'undefined')
+  (() => {
+  'use strict';
+
+  const {
+    assignDefaultRoles,
+    dpsJobs,
+    getJobGroup,
+    healerJobs,
+    roleGroups,
+    roles,
+    tankJobs,
+  } = StringRolePriority;
+  const groupStarts = new Set(['MT', 'H1', 'D1']);
   const demoMode = new URLSearchParams(window.location.search).get('demo') === '1';
   const storageKey = demoMode ? 'string-runtime-role-map-demo-v1' : 'string-runtime-role-map-v1';
   const configStorageKey = demoMode
@@ -107,10 +231,6 @@
   };
   const priorityRoleGroups = Object.fromEntries(Object.entries(priorityGroupRoles)
     .flatMap(([group, groupRoles]) => groupRoles.map((role) => [role, group])));
-  const tankJobs = [1, 3, 19, 21, 32, 37];
-  const healerJobs = [6, 24, 28, 33, 40];
-  const dpsJobs = [2, 4, 5, 7, 20, 22, 23, 25, 26, 27, 29, 30, 31, 34, 35, 36, 38, 39, 41, 42];
-  const defaultJobSort = [21, 32, 37, 19, 33, 24, 40, 28, 41, 34, 30, 39, 22, 20, 38, 23, 31, 42, 25, 27, 35, 36];
   const jobNames = {
     1: '剑术', 2: '格斗', 3: '斧术', 4: '枪术', 5: '弓术', 6: '幻术', 7: '咒术',
     19: '骑士', 20: '武僧', 21: '战士', 22: '龙骑', 23: '诗人', 24: '白魔',
@@ -1397,39 +1517,12 @@
     };
   }
 
-  function sortScore(member) {
-    const index = defaultJobSort.indexOf(Number(member.job));
-    return index < 0 ? 999 : index;
-  }
-
-  function getJobGroup(job) {
-    if (tankJobs.includes(Number(job)))
-      return 'tank';
-    if (healerJobs.includes(Number(job)))
-      return 'healer';
-    if (dpsJobs.includes(Number(job)))
-      return 'dps';
-  }
-
   function getCompatibleRoles(member) {
     return roleGroups[getJobGroup(member.job)] ?? [];
   }
 
   function isRoleCompatible(member, role) {
     return getCompatibleRoles(member).includes(role);
-  }
-
-  function assignDefaultRoles(members) {
-    const sorted = [...members].sort((left, right) => sortScore(left) - sortScore(right));
-    const counters = { tank: 0, healer: 0, dps: 0 };
-
-    for (const member of sorted) {
-      member.rp = undefined;
-      const group = getJobGroup(member.job);
-      if (group === undefined)
-        continue;
-      member.rp = roleGroups[group][counters[group]++] ?? undefined;
-    }
   }
 
   function applyStoredRoles() {
@@ -1470,11 +1563,16 @@
   }
 
   function saveRoles() {
-    roleByName = Object.fromEntries(
-      party
-        .filter((member) => member.name !== '' && isRoleCompatible(member, member.rp))
-        .map((member) => [member.name, member.rp]),
-    );
+    const nextRoleByName = { ...roleByName };
+    for (const member of party) {
+      if (member.name === '')
+        continue;
+      if (isRoleCompatible(member, member.rp))
+        nextRoleByName[member.name] = member.rp;
+      else
+        delete nextRoleByName[member.name];
+    }
+    roleByName = nextRoleByName;
     writeJson(storageKey, roleByName);
   }
 
@@ -1491,51 +1589,6 @@
 
   function getMemberByRole(role) {
     return party.find((member) => member.rp === role);
-  }
-
-  function createMemberSelect(role, selectedName) {
-    const select = document.createElement('select');
-    select.className = 'member-select';
-    select.setAttribute('aria-label', `${role} 队员`);
-
-    const emptyOption = document.createElement('option');
-    emptyOption.value = '';
-    emptyOption.textContent = '未分配';
-    select.append(emptyOption);
-
-    for (const member of party) {
-      if (member.name === '' || !isRoleCompatible(member, role))
-        continue;
-      const option = document.createElement('option');
-      option.value = member.name;
-      option.textContent = member.name;
-      select.append(option);
-    }
-
-    select.value = selectedName ?? '';
-    select.addEventListener('change', () => assignMemberToRole(select.value, role));
-    return select;
-  }
-
-  function assignMemberToRole(memberName, nextRole) {
-    const currentMember = getMemberByRole(nextRole);
-    const nextMember = party.find((member) => member.name === memberName);
-
-    if (nextMember !== undefined && !isRoleCompatible(nextMember, nextRole))
-      return;
-
-    if (currentMember !== undefined && nextMember === undefined) {
-      currentMember.rp = undefined;
-    } else if (nextMember !== undefined) {
-      const previousRole = nextMember.rp;
-      nextMember.rp = nextRole;
-      if (currentMember !== undefined && currentMember !== nextMember)
-        currentMember.rp = previousRole;
-    }
-
-    saveRoles();
-    render();
-    scheduleBroadcast();
   }
 
   function swapRoleSlots(sourceRole, targetRole) {
@@ -1558,7 +1611,7 @@
   }
 
   function canSwapRoleSlots(sourceRole, targetRole) {
-    if (sourceRole === targetRole)
+    if (encounterState.locked || sourceRole === targetRole)
       return false;
     const sourceMember = getMemberByRole(sourceRole);
     const targetMember = getMemberByRole(targetRole);
@@ -1599,11 +1652,6 @@
   function render() {
     if (pointerDragState !== undefined)
       clearPointerDrag();
-    if (openCustomSelectState !== undefined &&
-        openCustomSelectState.state.root.closest('#roleSlots') !== null)
-      closeCustomSelect(openCustomSelectState.select);
-    for (const select of roleSlots.querySelectorAll('select'))
-      customSelects.get(select)?.observer.disconnect();
     roleSlots.replaceChildren();
     const duplicateRoles = getDuplicateRoles();
 
@@ -1626,20 +1674,15 @@
       }
       const memberName = slot.querySelector('.member-name');
       memberName.textContent = member?.name ?? '';
-      memberName.tabIndex = member?.name === undefined || member.name === '' ? -1 : 0;
+      memberName.tabIndex = member === undefined || member.name === '' || encounterState.locked ? -1 : 0;
+      memberName.setAttribute('aria-disabled', String(encounterState.locked));
+      memberName.setAttribute('aria-keyshortcuts', 'ArrowUp ArrowDown ArrowLeft ArrowRight');
+      memberName.setAttribute('aria-label', member === undefined || member.name === ''
+        ? `${role} 未分配`
+        : `${member.name}，当前 ${role}，使用方向键或拖拽调整职能`);
       slot.querySelector('.member-job').textContent = member === undefined || member.job <= 0 ? '' : jobNames[member.job] ?? `Job ${member.job}`;
-      const select = createMemberSelect(role, member?.name);
-      memberName.addEventListener('keydown', (event) => {
-        if (member?.name === undefined || member.name === '')
-          return;
-        if (event.key !== 'Enter' && event.key !== ' ')
-          return;
-        event.preventDefault();
-        openMemberSelect(select);
-      });
-      slot.querySelector('.member-select').replaceWith(select);
-      bindSelectInteraction(select);
-      bindPointerDrag(memberName, select, slot, role);
+      bindPointerDrag(memberName, slot, role);
+      bindRoleKeyboard(memberName, role);
       roleSlots.append(slot);
     }
 
@@ -1655,17 +1698,16 @@
       statusText.textContent = `职业无法匹配职能：${unassignedMembers.map((member) => member.name).join('、')}`;
     else if (missingRoles.length > 0)
       statusText.textContent = `未分配：${missingRoles.join('/')}`;
+    else if (encounterState.locked)
+      statusText.textContent = '战斗中职能已锁定。';
     else
-      statusText.textContent = '拖拽玩家或点击名字调整职能。';
+      statusText.textContent = '拖拽玩家调整职能。';
+    renderRoleEditState();
   }
 
-  function openMemberSelect(select) {
-    openCustomSelect(select);
-  }
-
-  function bindPointerDrag(handle, select, slot, role) {
+  function bindPointerDrag(handle, slot, role) {
     handle.addEventListener('pointerdown', (event) => {
-      if (event.button !== 0 || getMemberByRole(role) === undefined)
+      if (encounterState.locked || event.button !== 0 || getMemberByRole(role) === undefined)
         return;
       clearPointerDrag();
       pointerDragState = {
@@ -1709,10 +1751,8 @@
         updatePointerDragTarget(state, event.clientX, event.clientY);
       const targetRole = state.targetRole;
       clearPointerDrag();
-      if (!state.active) {
-        openMemberSelect(select);
+      if (!state.active)
         return;
-      }
       event.preventDefault();
       if (targetRole !== undefined)
         swapRoleSlots(state.role, targetRole);
@@ -1723,6 +1763,58 @@
       if (pointerDragState?.pointerId === event.pointerId)
         clearPointerDrag();
     });
+  }
+
+  function bindRoleKeyboard(handle, role) {
+    handle.addEventListener('keydown', (event) => {
+      if (encounterState.locked)
+        return;
+      const offset = event.key === 'ArrowUp' || event.key === 'ArrowLeft'
+        ? -1
+        : event.key === 'ArrowDown' || event.key === 'ArrowRight'
+          ? 1
+          : 0;
+      if (offset === 0)
+        return;
+      const member = getMemberByRole(role);
+      const compatibleRoles = member === undefined ? [] : getCompatibleRoles(member);
+      const targetRole = compatibleRoles[compatibleRoles.indexOf(role) + offset];
+      if (targetRole === undefined)
+        return;
+      event.preventDefault();
+      if (swapRoleSlots(role, targetRole))
+        roleSlots.querySelector(`[data-role="${targetRole}"] .member-name`)?.focus();
+    });
+  }
+
+  function renderRoleEditState() {
+    const locked = encounterState.locked === true;
+    roleSlots.classList.toggle('locked', locked);
+    defaultSortButton.disabled = locked;
+    defaultSortButton.title = locked
+      ? '战斗中职能已锁定'
+      : '按职业默认顺序重新分配';
+    for (const slot of roleSlots.querySelectorAll('.role-slot')) {
+      const memberName = slot.querySelector('.member-name');
+      const hasMember = getMemberByRole(slot.dataset.role) !== undefined;
+      if (memberName === null)
+        continue;
+      memberName.tabIndex = !locked && hasMember ? 0 : -1;
+      memberName.setAttribute('aria-disabled', String(locked));
+      memberName.setAttribute('aria-keyshortcuts', locked ? '' : 'ArrowUp ArrowDown ArrowLeft ArrowRight');
+      const memberNameText = memberName.textContent ?? '';
+      memberName.setAttribute('aria-label', !hasMember || memberNameText === ''
+        ? `${slot.dataset.role} 未分配`
+        : locked
+          ? `${memberNameText}，当前 ${slot.dataset.role}，战斗中职能已锁定`
+          : `${memberNameText}，当前 ${slot.dataset.role}，使用方向键或拖拽调整职能`);
+    }
+    if (locked && statusText.textContent === '拖拽玩家调整职能。')
+      statusText.textContent = '战斗中职能已锁定。';
+    else if (!locked && statusText.textContent === '战斗中职能已锁定。')
+      statusText.textContent = '拖拽玩家调整职能。';
+    if (locked && pointerDragState !== undefined)
+      clearPointerDrag();
   }
 
   function startPointerDrag(state) {
@@ -1793,10 +1885,13 @@
   }
 
   function defaultSort() {
+    if (encounterState.locked)
+      return false;
     assignDefaultRoles(party);
     saveRoles();
     render();
     scheduleBroadcast();
+    return true;
   }
 
   function buildPayload() {
@@ -2189,8 +2284,6 @@
 
     const root = document.createElement('div');
     root.className = 'string-combobox';
-    if (select.classList.contains('member-select'))
-      root.classList.add('member-combobox');
     root.dataset.open = 'false';
 
     const trigger = document.createElement('button');
@@ -2450,6 +2543,7 @@
       configHint.textContent = `当前使用“${activeProfile?.name ?? '默认配置'}”；修改会自动保存并生效。`;
       dirtyState.textContent = '当前设置已保存并生效';
     }
+    renderRoleEditState();
     scheduleOverlayResize();
   }
 
