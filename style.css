@@ -232,6 +232,7 @@ input:focus-visible,
   text-overflow: ellipsis;
   touch-action: none;
   white-space: nowrap;
+  -webkit-app-region: no-drag;
 }
 
 .role-slots.locked .member-name {
@@ -265,6 +266,29 @@ input:focus-visible,
   min-height: 36px;
   padding: 3px 7px 4px;
   border-top: 1px solid var(--line);
+}
+
+.window-drag-handle {
+  display: grid;
+  flex: 1 1 auto;
+  align-self: stretch;
+  min-width: 24px;
+  place-items: center;
+  cursor: move;
+  -webkit-app-region: drag;
+}
+
+.window-drag-handle::before {
+  width: 28px;
+  height: 3px;
+  border-radius: 999px;
+  background: rgba(123, 128, 141, 0.32);
+  content: "";
+  transition: background-color 140ms ease;
+}
+
+.window-drag-handle:hover::before {
+  background: rgba(102, 113, 201, 0.52);
 }
 
 .icon-button {
@@ -510,6 +534,8 @@ html.role-drag-active * {
   gap: 16px;
   padding: 0 20px 0 22px;
   border-bottom: 1px solid var(--line);
+  cursor: move;
+  -webkit-app-region: drag;
 }
 
 .config-header h1 {
